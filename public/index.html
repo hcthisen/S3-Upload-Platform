@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hetzner S3 Upload Platform</title>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+    />
+    <link
+      rel="stylesheet"
+      href="https://releases.transloadit.com/uppy/v3.7.1/uppy.min.css"
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0f172a;
+        --fg: #e2e8f0;
+        --panel: rgba(15, 23, 42, 0.7);
+        --accent: #38bdf8;
+        --accent-strong: #0ea5e9;
+        --border: rgba(148, 163, 184, 0.25);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+        background: radial-gradient(circle at 20% 20%, rgba(14, 165, 233, 0.15), transparent 45%),
+          radial-gradient(circle at 80% 0%, rgba(244, 114, 182, 0.15), transparent 50%),
+          var(--bg);
+        color: var(--fg);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 3rem 1.5rem;
+      }
+
+      main {
+        width: min(1100px, 100%);
+        display: grid;
+        gap: 1.5rem;
+        backdrop-filter: blur(16px);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 24px;
+        padding: 2rem;
+        box-shadow: 0 40px 80px rgba(15, 23, 42, 0.35);
+      }
+
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      h1 {
+        font-size: clamp(1.75rem, 2vw, 2.25rem);
+        font-weight: 600;
+        margin: 0;
+        letter-spacing: -0.02em;
+      }
+
+      .breadcrumb {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+        font-size: 0.95rem;
+      }
+
+      .breadcrumb span,
+      .breadcrumb button {
+        background: rgba(148, 163, 184, 0.14);
+        border: none;
+        color: inherit;
+        border-radius: 999px;
+        padding: 0.35rem 0.85rem;
+        cursor: pointer;
+        transition: transform 0.2s ease, background 0.2s ease;
+      }
+
+      .breadcrumb span {
+        cursor: default;
+      }
+
+      .breadcrumb button:hover {
+        transform: translateY(-1px);
+        background: rgba(56, 189, 248, 0.25);
+      }
+
+      .panel {
+        background: rgba(15, 23, 42, 0.55);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 1.5rem;
+        display: grid;
+        gap: 1rem;
+      }
+
+      .panel h2 {
+        margin: 0;
+        font-size: 1.1rem;
+        font-weight: 600;
+      }
+
+      form {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: center;
+      }
+
+      input[type='text'] {
+        flex: 1 1 220px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: rgba(15, 23, 42, 0.4);
+        color: inherit;
+        padding: 0.65rem 1rem;
+        font-size: 0.95rem;
+        transition: border 0.2s ease;
+      }
+
+      input[type='text']:focus {
+        outline: none;
+        border-color: rgba(56, 189, 248, 0.6);
+      }
+
+      button.primary {
+        border: none;
+        border-radius: 999px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        color: #0f172a;
+        padding: 0.65rem 1.4rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+      }
+
+      button.primary:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 10px 25px rgba(14, 165, 233, 0.25);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      thead {
+        text-transform: uppercase;
+        font-size: 0.75rem;
+        letter-spacing: 0.08em;
+        color: rgba(226, 232, 240, 0.6);
+      }
+
+      th,
+      td {
+        padding: 0.75rem 0.5rem;
+        text-align: left;
+      }
+
+      tbody tr {
+        border-top: 1px solid rgba(148, 163, 184, 0.2);
+        transition: background 0.15s ease;
+      }
+
+      tbody tr:hover {
+        background: rgba(56, 189, 248, 0.15);
+        cursor: pointer;
+      }
+
+      .status {
+        font-size: 0.9rem;
+        color: rgba(148, 163, 184, 0.9);
+      }
+
+      .load-more {
+        text-align: center;
+      }
+
+      .load-more button {
+        margin-top: 0.5rem;
+        padding: 0.5rem 1.25rem;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        transition: border 0.2s ease, background 0.2s ease;
+      }
+
+      .load-more button:hover {
+        border-color: rgba(56, 189, 248, 0.6);
+        background: rgba(56, 189, 248, 0.18);
+      }
+
+      #uppy-dashboard {
+        border-radius: 16px;
+        overflow: hidden;
+        background: rgba(15, 23, 42, 0.4);
+      }
+
+      @media (max-width: 720px) {
+        main {
+          padding: 1.25rem;
+        }
+
+        table,
+        thead {
+          display: none;
+        }
+
+        .card-list {
+          display: grid;
+          gap: 0.75rem;
+        }
+
+        .card {
+          padding: 0.85rem 1rem;
+          border-radius: 14px;
+          background: rgba(15, 23, 42, 0.45);
+          border: 1px solid rgba(148, 163, 184, 0.25);
+          display: grid;
+          gap: 0.35rem;
+        }
+
+        .card .name {
+          font-weight: 600;
+        }
+
+        .card .meta {
+          font-size: 0.85rem;
+          color: rgba(148, 163, 184, 0.8);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Hetzner S3 Upload Platform</h1>
+          <div class="breadcrumb" id="breadcrumb"></div>
+        </div>
+        <p class="status" id="status">Browsing bucket…</p>
+      </header>
+
+      <section class="panel">
+        <h2>Browse Objects</h2>
+        <div class="table-wrapper">
+          <table aria-label="Objects" id="object-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Size</th>
+                <th>Last modified</th>
+              </tr>
+            </thead>
+            <tbody id="listing-body"></tbody>
+          </table>
+          <div class="card-list" id="card-list" hidden></div>
+          <div class="load-more" id="load-more" hidden>
+            <button type="button" id="load-more-btn">Load more</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Create folder</h2>
+        <form id="mkdir-form">
+          <input
+            type="text"
+            id="folder-name"
+            name="folder"
+            placeholder="Folder name"
+            autocomplete="off"
+            required
+          />
+          <button class="primary" type="submit">Create</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Upload files</h2>
+        <div id="uppy-dashboard"></div>
+      </section>
+    </main>
+
+    <script src="https://releases.transloadit.com/uppy/v3.7.1/uppy.min.js"></script>
+    <script src="https://releases.transloadit.com/uppy/v3.7.1/aws-s3-multipart.min.js"></script>
+    <script>
+      const listingBody = document.getElementById('listing-body');
+      const cardList = document.getElementById('card-list');
+      const breadcrumb = document.getElementById('breadcrumb');
+      const statusEl = document.getElementById('status');
+      const loadMoreContainer = document.getElementById('load-more');
+      const loadMoreBtn = document.getElementById('load-more-btn');
+      const mkdirForm = document.getElementById('mkdir-form');
+      const folderInput = document.getElementById('folder-name');
+      const objectTable = document.getElementById('object-table');
+
+      let currentPrefix = '';
+      let nextToken = null;
+
+      const viewportQuery = window.matchMedia('(max-width: 720px)');
+      let prefersCards = viewportQuery.matches;
+      viewportQuery.addEventListener('change', () => {
+        prefersCards = viewportQuery.matches;
+        loadPrefix(currentPrefix);
+      });
+
+      function resetListing() {
+        listingBody.innerHTML = '';
+        cardList.innerHTML = '';
+      }
+
+      function formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        if (!bytes && bytes !== 0) return '-';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+        return `${(bytes / Math.pow(1024, exponent)).toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
+      }
+
+      function formatDate(value) {
+        if (!value) return '-';
+        const date = new Date(value);
+        return date.toLocaleString();
+      }
+
+      function buildBreadcrumb(prefix) {
+        breadcrumb.innerHTML = '';
+        const rootButton = document.createElement('button');
+        rootButton.type = 'button';
+        rootButton.textContent = 'Root';
+        rootButton.addEventListener('click', () => navigate(''));
+        breadcrumb.appendChild(rootButton);
+
+        if (!prefix) return;
+
+        const parts = prefix.replace(/\/$/, '').split('/');
+        let cumulative = '';
+        parts.forEach((part, index) => {
+          cumulative += `${part}/`;
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.textContent = part;
+          btn.addEventListener('click', () => navigate(cumulative));
+          breadcrumb.appendChild(btn);
+        });
+      }
+
+      function renderFolderRow(folderPrefix) {
+        const name = folderPrefix.replace(currentPrefix, '').replace(/\/$/, '');
+        const tr = document.createElement('tr');
+        tr.classList.add('folder');
+        tr.addEventListener('click', () => navigate(folderPrefix));
+
+        const nameTd = document.createElement('td');
+        nameTd.textContent = `📁 ${name}`;
+        const sizeTd = document.createElement('td');
+        sizeTd.textContent = '-';
+        const modifiedTd = document.createElement('td');
+        modifiedTd.textContent = '-';
+
+        tr.appendChild(nameTd);
+        tr.appendChild(sizeTd);
+        tr.appendChild(modifiedTd);
+        listingBody.appendChild(tr);
+
+        if (prefersCards) {
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.addEventListener('click', () => navigate(folderPrefix));
+          card.innerHTML = `<div class="name">📁 ${name}</div><div class="meta">Folder</div>`;
+          cardList.appendChild(card);
+        }
+      }
+
+      function renderFileRow(object) {
+        const tr = document.createElement('tr');
+        tr.classList.add('file');
+        const nameTd = document.createElement('td');
+        nameTd.textContent = `📄 ${object.key.replace(currentPrefix, '')}`;
+        const sizeTd = document.createElement('td');
+        sizeTd.textContent = formatBytes(object.size);
+        const modifiedTd = document.createElement('td');
+        modifiedTd.textContent = formatDate(object.lastModified);
+
+        tr.appendChild(nameTd);
+        tr.appendChild(sizeTd);
+        tr.appendChild(modifiedTd);
+        listingBody.appendChild(tr);
+
+        if (prefersCards) {
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.innerHTML = `
+            <div class="name">📄 ${object.key.replace(currentPrefix, '')}</div>
+            <div class="meta">${formatBytes(object.size)} • ${formatDate(object.lastModified)}</div>
+          `;
+          cardList.appendChild(card);
+        }
+      }
+
+      async function loadPrefix(prefix = '', continuationToken) {
+        statusEl.textContent = 'Loading…';
+        const params = new URLSearchParams();
+        if (prefix) params.set('prefix', prefix);
+        if (continuationToken) params.set('continuationToken', continuationToken);
+
+        let data;
+        try {
+          const response = await fetch(`/api/list?${params.toString()}`);
+          if (!response.ok) {
+            statusEl.textContent = 'Failed to load objects';
+            loadMoreContainer.hidden = true;
+            return;
+          }
+
+          data = await response.json();
+        } catch (error) {
+          console.error(error);
+          statusEl.textContent = 'Failed to load objects';
+          loadMoreContainer.hidden = true;
+          return;
+        }
+
+        if (!continuationToken) {
+          resetListing();
+          currentPrefix = data.prefix;
+          buildBreadcrumb(currentPrefix);
+        }
+
+        const prefixes = data.prefixes || [];
+        const objects = data.objects || [];
+
+        prefixes.forEach((p) => renderFolderRow(p.prefix));
+        objects.forEach((o) => renderFileRow(o));
+
+        nextToken = data.nextContinuationToken;
+        loadMoreContainer.hidden = !nextToken;
+        if (prefersCards) {
+          const hasContent = cardList.children.length > 0;
+          cardList.hidden = !hasContent;
+          objectTable.style.display = 'none';
+        } else {
+          cardList.hidden = true;
+          objectTable.style.display = 'table';
+        }
+
+        statusEl.textContent = prefixes.length === 0 && objects.length === 0
+          ? 'This folder is empty'
+          : `Showing ${prefixes.length + objects.length} item(s)`;
+      }
+
+      function navigate(prefix) {
+        loadPrefix(prefix);
+      }
+
+      loadMoreBtn.addEventListener('click', () => {
+        if (nextToken) {
+          loadPrefix(currentPrefix, nextToken);
+        }
+      });
+
+      mkdirForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const name = folderInput.value.trim();
+        if (!name) return;
+
+        const prefix = `${currentPrefix}${name.replace(/\/+$/, '')}/`;
+        try {
+          const response = await fetch('/api/mkdir', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prefix })
+          });
+
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+
+          folderInput.value = '';
+          statusEl.textContent = 'Folder created';
+          await loadPrefix(currentPrefix);
+        } catch (error) {
+          console.error(error);
+          statusEl.textContent = 'Failed to create folder';
+        }
+      });
+
+      const uppy = new Uppy.Core({
+        allowMultipleUploads: true,
+        restrictions: { maxFileSize: null }
+      });
+
+      uppy.use(Uppy.Dashboard, {
+        inline: true,
+        target: '#uppy-dashboard',
+        height: 360,
+        theme: 'dark',
+        note: 'Uploads stream directly to Hetzner S3 via multipart uploads.'
+      });
+
+      uppy.use(Uppy.AwsS3Multipart, {
+        limit: 5,
+        async createMultipartUpload(file) {
+          const key = `${currentPrefix}${file.name}`;
+          const response = await fetch('/api/create-multipart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key, contentType: file.type || 'application/octet-stream' })
+          });
+
+          if (!response.ok) {
+            throw new Error('Failed to initialize multipart upload');
+          }
+
+          return response.json();
+        },
+        async signPart(file, { uploadId, key, partNumber }) {
+          const params = new URLSearchParams({ key, uploadId, partNumber: String(partNumber) });
+          const response = await fetch(`/api/sign-part?${params.toString()}`);
+          if (!response.ok) {
+            throw new Error('Failed to sign part');
+          }
+          const data = await response.json();
+          return data.url;
+        },
+        async completeMultipartUpload(file, { uploadId, key, parts }) {
+          const response = await fetch('/api/complete-multipart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId, key, parts })
+          });
+
+          if (!response.ok) {
+            throw new Error('Failed to finalize upload');
+          }
+
+          return response.json();
+        },
+        async abortMultipartUpload(file, { uploadId, key }) {
+          await fetch('/api/abort-multipart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId, key })
+          });
+        }
+      });
+
+      uppy.on('complete', async () => {
+        statusEl.textContent = 'Upload complete';
+        await loadPrefix(currentPrefix);
+      });
+
+      uppy.on('error', (error) => {
+        statusEl.textContent = `Upload error: ${error.message}`;
+      });
+
+      navigate('');
+    </script>
+  </body>
+</html>
