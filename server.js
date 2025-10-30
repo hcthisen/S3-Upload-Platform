@@ -83,6 +83,28 @@ const s3Client = new S3Client({
   forcePathStyle: FORCE_PATH_STYLE ? FORCE_PATH_STYLE.toLowerCase() === 'true' : true
 });
 
+const logger = {
+  info: (message, meta = {}) => {
+    console.log(`[INFO] ${message}`, Object.keys(meta).length ? JSON.stringify(meta) : '');
+  },
+  warn: (message, meta = {}) => {
+    console.warn(`[WARN] ${message}`, Object.keys(meta).length ? JSON.stringify(meta) : '');
+  },
+  error: (message, meta = {}) => {
+    console.error(`[ERROR] ${message}`, Object.keys(meta).length ? JSON.stringify(meta) : '');
+  }
+};
+
+const serializeError = (error) => ({
+  name: error?.name,
+  message: error?.message,
+  stack: error?.stack,
+  statusCode: error?.statusCode,
+  retryable: error?.retryable,
+  code: error?.code,
+  $metadata: error?.$metadata
+});
+
 const app = express();
 
 const containsTraversal = (value) => value.includes('..');
@@ -90,9 +112,11 @@ const containsTraversal = (value) => value.includes('..');
 const trustProxySetting = parseTrustProxy(TRUST_PROXY);
 app.set('trust proxy', trustProxySetting);
 
-console.log(`S3 Endpoint: ${S3_ENDPOINT}`);
-console.log(`S3 Bucket: ${S3_BUCKET}`);
-console.log(`Trust proxy setting: ${JSON.stringify(app.get('trust proxy'))}`);
+logger.info('Server configuration', {
+  s3Endpoint: S3_ENDPOINT,
+  s3Bucket: S3_BUCKET,
+  trustProxy: app.get('trust proxy')
+});
 app.use(helmet({
   contentSecurityPolicy: false
 }));
@@ -109,6 +133,49 @@ app.use(express.static('public', { fallthrough: true }));
 
 const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
+};
+
+app.use((req, res, next) => {
+  const startTime = Date.now();
+  const requestMeta = {
+    method: req.method,
+    url: req.originalUrl,
+    ip: req.ip,
+    user: req.auth?.user
+  };
+
+  logger.info('Incoming request', requestMeta);
+
+  res.on('finish', () => {
+    logger.info('Request completed', {
+      ...requestMeta,
+      statusCode: res.statusCode,
+      durationMs: Date.now() - startTime
+    });
+  });
+
+  next();
+});
+
+const sendS3Command = async (command, meta = {}) => {
+  const commandName = command?.constructor?.name || 'UnknownCommand';
+  logger.info('Executing S3 command', { command: commandName, ...meta });
+  try {
+    const response = await s3Client.send(command);
+    logger.info('S3 command succeeded', {
+      command: commandName,
+      ...meta,
+      httpStatusCode: response?.$metadata?.httpStatusCode
+    });
+    return response;
+  } catch (error) {
+    logger.error('S3 command failed', {
+      command: commandName,
+      ...meta,
+      error: serializeError(error)
+    });
+    throw error;
+  }
 };
 
 app.get('/api/list', asyncHandler(async (req, res) => {
@@ -133,7 +200,10 @@ app.get('/api/list', asyncHandler(async (req, res) => {
   };
 
   const command = new ListObjectsV2Command(params);
-  const response = await s3Client.send(command);
+  const response = await sendS3Command(command, {
+    prefix: params.Prefix,
+    continuationToken: params.ContinuationToken
+  });
 
   const prefixes = (response.CommonPrefixes || [])
     .map((item) => ({ prefix: item.Prefix }))
@@ -178,7 +248,7 @@ app.post('/api/mkdir', asyncHandler(async (req, res) => {
     Body: ''
   });
 
-  await s3Client.send(command);
+  await sendS3Command(command, { key: sanitized });
   res.status(201).json({ key: sanitized });
 }));
 
@@ -200,7 +270,7 @@ app.post('/api/create-multipart', asyncHandler(async (req, res) => {
     ContentType: contentType
   });
 
-  const response = await s3Client.send(command);
+  const response = await sendS3Command(command, { key: objectKey, contentType });
   if (!response?.UploadId) {
     throw new Error('Failed to create multipart upload: missing UploadId');
   }
@@ -231,7 +301,17 @@ app.get('/api/sign-part', asyncHandler(async (req, res) => {
     PartNumber: partNum
   });
 
+  logger.info('Generating signed URL for multipart upload part', {
+    key,
+    uploadId,
+    partNumber: partNum
+  });
   const url = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+  logger.info('Generated signed URL for multipart upload part', {
+    key,
+    uploadId,
+    partNumber: partNum
+  });
   res.json({ url });
 }));
 
@@ -267,7 +347,11 @@ app.post('/api/complete-multipart', asyncHandler(async (req, res) => {
     }
   });
 
-  const response = await s3Client.send(command);
+  const response = await sendS3Command(command, {
+    key,
+    uploadId,
+    partsCount: formattedParts.length
+  });
   res.json({ location: response.Location, bucket: response.Bucket, key: response.Key });
 }));
 
@@ -288,16 +372,21 @@ app.post('/api/abort-multipart', asyncHandler(async (req, res) => {
     UploadId: uploadId
   });
 
-  await s3Client.send(command);
+  await sendS3Command(command, { key, uploadId });
   res.status(204).end();
 }));
 
 app.use((err, req, res, next) => {
-  console.error(err);
+  logger.error('Unhandled error encountered', {
+    method: req.method,
+    url: req.originalUrl,
+    user: req.auth?.user,
+    error: serializeError(err)
+  });
   const status = err.$metadata?.httpStatusCode || err.statusCode || 500;
   res.status(status).json({ error: 'Internal server error' });
 });
 
 app.listen(Number(PORT), () => {
-  console.log(`Server running on port ${PORT}`);
+  logger.info('Server running', { port: Number(PORT) });
 });
