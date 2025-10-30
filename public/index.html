@@ -525,11 +525,17 @@
 
           const etag = putResponse.headers.get('etag');
           if (!etag) {
-            throw new Error(`Missing ETag for part ${partNumber}. Verify bucket CORS ExposeHeaders.`);
+            console.warn(
+              `Missing ETag for part ${partNumber}; will resolve via server before completion.`
+            );
           }
 
-          partsMap.set(partNumber, { PartNumber: partNumber, ETag: etag });
-          completedMap[partNumber] = etag;
+          partsMap.set(partNumber, { PartNumber: partNumber, ETag: etag || null });
+          if (etag) {
+            completedMap[partNumber] = etag;
+          } else if (completedMap[partNumber]) {
+            delete completedMap[partNumber];
+          }
           persistResumeState();
 
           uploadedBytes += blob.size;
