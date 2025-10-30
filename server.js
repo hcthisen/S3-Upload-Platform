@@ -10,7 +10,8 @@ import {
   CreateMultipartUploadCommand,
   CompleteMultipartUploadCommand,
   AbortMultipartUploadCommand,
-  UploadPartCommand
+  UploadPartCommand,
+  ListPartsCommand
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -435,27 +436,89 @@ app.post('/api/complete-multipart', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'Invalid key' });
   }
 
-  const normalizedParts = parts
+  const parsedParts = parts
     .map((part) => {
-      const partNumber = Number(part?.PartNumber ?? part?.partNumber);
-      const etag = part?.ETag ?? part?.etag;
+      const partNumber = Number(part?.PartNumber ?? part?.partNumber ?? part);
       if (!Number.isInteger(partNumber) || partNumber <= 0) {
         return null;
       }
-      if (typeof etag !== 'string' || etag.trim().length === 0) {
-        return null;
-      }
+
+      const rawEtag = part?.ETag ?? part?.etag;
+      const normalizedEtag =
+        typeof rawEtag === 'string' && rawEtag.trim().length > 0 ? rawEtag.trim() : null;
 
       return {
         PartNumber: partNumber,
-        ETag: etag.trim()
+        ETag: normalizedEtag
       };
+    })
+    .filter(Boolean);
+
+  if (parsedParts.length === 0) {
+    return res.status(400).json({ error: 'parts array must include valid PartNumber values' });
+  }
+
+  const missingPartNumbers = parsedParts
+    .filter((part) => !part.ETag)
+    .map((part) => part.PartNumber);
+
+  const etagLookup = new Map();
+
+  if (missingPartNumbers.length > 0) {
+    const remaining = new Set(missingPartNumbers);
+    let partNumberMarker = undefined;
+
+    while (remaining.size > 0) {
+      const listPartsCommand = new ListPartsCommand({
+        Bucket: S3_BUCKET,
+        Key: key,
+        UploadId: uploadId,
+        PartNumberMarker: partNumberMarker,
+        MaxParts: 1000
+      });
+
+      const listResponse = await sendS3Command(listPartsCommand, {
+        key,
+        uploadId,
+        partNumberMarker
+      });
+
+      for (const part of listResponse.Parts || []) {
+        if (!etagLookup.has(part.PartNumber)) {
+          etagLookup.set(part.PartNumber, part.ETag);
+        }
+        remaining.delete(part.PartNumber);
+      }
+
+      if (!listResponse.IsTruncated) {
+        break;
+      }
+
+      partNumberMarker = listResponse.NextPartNumberMarker;
+      if (partNumberMarker === undefined || partNumberMarker === null) {
+        break;
+      }
+    }
+
+    if (remaining.size > 0) {
+      return res.status(400).json({
+        error: `Unable to resolve ETag for parts: ${Array.from(remaining).join(', ')}`
+      });
+    }
+  }
+
+  const normalizedParts = parsedParts
+    .map((part) => {
+      const etag = part.ETag || etagLookup.get(part.PartNumber);
+      return etag
+        ? { PartNumber: part.PartNumber, ETag: etag }
+        : null;
     })
     .filter(Boolean)
     .sort((a, b) => a.PartNumber - b.PartNumber);
 
-  if (normalizedParts.length === 0) {
-    return res.status(400).json({ error: 'parts array must include valid PartNumber and ETag values' });
+  if (normalizedParts.length !== parsedParts.length) {
+    return res.status(400).json({ error: 'Failed to normalize all multipart upload parts' });
   }
 
   const command = new CompleteMultipartUploadCommand({
