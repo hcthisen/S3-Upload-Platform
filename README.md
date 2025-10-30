@@ -32,15 +32,17 @@ S3_SECRET_ACCESS_KEY=your-secret-key
 ADMIN_PASSWORD=change-me
 PORT=3000
 FORCE_PATH_STYLE=true
+TRUST_PROXY=true
 ```
 
 - `S3_ENDPOINT`: Hetzner object storage endpoint URL.
 - `S3_REGION`: Region identifier (e.g., `eu-central-2`).
-- `S3_BUCKET`: Bucket to manage via the dashboard.
+- `S3_BUCKET`: Bucket to manage via the dashboard. The app also accepts `S3_BUCKET_NAME`, `BUCKET`, or `BUCKET_NAME` for compatibility with existing deployments.
 - `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`: Access credentials with the minimum required permissions.
 - `ADMIN_PASSWORD`: Password for the `admin` user used by HTTP basic authentication.
 - `PORT` (optional): Port that the Express server listens on (defaults to 3000).
 - `FORCE_PATH_STYLE` (optional): Set to `true` to enable path-style requests (recommended for Hetzner).
+- `TRUST_PROXY` (optional): Overrides Express's [`trust proxy`](https://expressjs.com/en/guide/behind-proxies.html) setting. Defaults to `true` so deployments behind load balancers or reverse proxies correctly honour `X-Forwarded-*` headers. Set to `false` to disable or provide a numeric/string value to match your topology.
 
 ## Getting started locally
 

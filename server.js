@@ -12,16 +12,28 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
-const requiredEnv = [
-  'S3_ENDPOINT',
-  'S3_REGION',
-  'S3_BUCKET',
-  'S3_ACCESS_KEY_ID',
-  'S3_SECRET_ACCESS_KEY',
-  'ADMIN_PASSWORD'
-];
+const resolveBucket = () => {
+  const candidates = [
+    process.env.S3_BUCKET,
+    process.env.S3_BUCKET_NAME,
+    process.env.BUCKET,
+    process.env.BUCKET_NAME
+  ];
+  return candidates.find((value) => typeof value === 'string' && value.trim().length > 0) || '';
+};
 
-const missingEnv = requiredEnv.filter((key) => !process.env[key] || process.env[key].length === 0);
+const requiredEnv = {
+  S3_ENDPOINT: process.env.S3_ENDPOINT,
+  S3_REGION: process.env.S3_REGION,
+  S3_BUCKET: resolveBucket(),
+  S3_ACCESS_KEY_ID: process.env.S3_ACCESS_KEY_ID,
+  S3_SECRET_ACCESS_KEY: process.env.S3_SECRET_ACCESS_KEY,
+  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD
+};
+
+const missingEnv = Object.entries(requiredEnv)
+  .filter(([, value]) => typeof value !== 'string' || value.trim().length === 0)
+  .map(([key]) => key);
 if (missingEnv.length > 0) {
   console.error(`Missing required environment variables: ${missingEnv.join(', ')}`);
   process.exit(1);
@@ -30,13 +42,36 @@ if (missingEnv.length > 0) {
 const {
   S3_ENDPOINT,
   S3_REGION,
-  S3_BUCKET,
   S3_ACCESS_KEY_ID,
-  S3_SECRET_ACCESS_KEY,
-  ADMIN_PASSWORD,
-  FORCE_PATH_STYLE,
-  PORT = 3000
+  S3_SECRET_ACCESS_KEY
 } = process.env;
+
+const S3_BUCKET = requiredEnv.S3_BUCKET;
+const ADMIN_PASSWORD = requiredEnv.ADMIN_PASSWORD;
+const FORCE_PATH_STYLE = process.env.FORCE_PATH_STYLE;
+const PORT = process.env.PORT || 3000;
+const TRUST_PROXY = process.env.TRUST_PROXY;
+
+const parseTrustProxy = (value) => {
+  if (value === undefined) {
+    return true;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (['false', '0', 'no'].includes(normalized)) {
+    return false;
+  }
+  if (['true', '1', 'yes'].includes(normalized)) {
+    return true;
+  }
+
+  const asNumber = Number(value);
+  if (!Number.isNaN(asNumber)) {
+    return asNumber;
+  }
+
+  return value;
+};
 
 const s3Client = new S3Client({
   region: S3_REGION,
@@ -52,7 +87,12 @@ const app = express();
 
 const containsTraversal = (value) => value.includes('..');
 
-app.set('trust proxy', 1);
+const trustProxySetting = parseTrustProxy(TRUST_PROXY);
+app.set('trust proxy', trustProxySetting);
+
+console.log(`S3 Endpoint: ${S3_ENDPOINT}`);
+console.log(`S3 Bucket: ${S3_BUCKET}`);
+console.log(`Trust proxy setting: ${JSON.stringify(app.get('trust proxy'))}`);
 app.use(helmet({
   contentSecurityPolicy: false
 }));
