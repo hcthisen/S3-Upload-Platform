@@ -1,2 +1,1 @@
-# S3-Upload-Platform
-A simple platform for uploading large files directly to S3 buckets
+Self-hosted web UI for Hetzner S3. Password-protected dashboard to browse prefixes, create folders, and upload large files via browser using S3 Multipart Upload with presigned URLs. Server signs requests only; data streams client→S3. Deployable on Coolify (Docker). Uses Node/Express + AWS SDK v3 + Uppy. Env-configurable keys/endpoint.
