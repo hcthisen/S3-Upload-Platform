@@ -188,7 +188,7 @@ const s3Client = new S3Client({
     secretAccessKey: S3_SECRET_ACCESS_KEY
   },
   forcePathStyle: FORCE_PATH_STYLE ? FORCE_PATH_STYLE.toLowerCase() === 'true' : true,
-  signingEscapePath: false
+  signingEscapePath: true
 });
 
 const app = express();
