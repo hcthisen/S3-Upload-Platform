@@ -5,7 +5,6 @@ const cookieParser = require('cookie-parser');
 const path = require('path');
 const { S3Client, ListObjectsV2Command, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const { createPresignedPost } = require('@aws-sdk/s3-presigned-post');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
