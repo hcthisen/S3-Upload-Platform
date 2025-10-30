@@ -592,6 +592,7 @@
           async signPart(file, { uploadId, key, partNumber }) {
             const params = new URLSearchParams({ key, uploadId, partNumber: String(partNumber) });
             const response = await fetch(`/api/sign-part?${params.toString()}`, {
+              method: 'GET',
               cache: 'no-store'
             });
             if (!response.ok) {
