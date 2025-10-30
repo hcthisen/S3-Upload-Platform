@@ -337,9 +337,6 @@
         cardList.innerHTML = '';
       }
 
-      const MIN_CHUNK_SIZE = 5 * 1024 * 1024; // 5 MiB
-      const MAX_MULTIPART_PARTS = 10000;
-
       function formatBytes(bytes) {
         if (bytes === 0) return '0 B';
         if (!bytes && bytes !== 0) return '-';
@@ -354,15 +351,16 @@
         return date.toLocaleString();
       }
 
-      function calculateChunkSize(fileSize) {
-        if (!Number.isFinite(fileSize) || fileSize <= 0) {
-          return MIN_CHUNK_SIZE;
+      function calculateChunkSize(totalSize) {
+        const MIN_CHUNK = 5 * 1024 * 1024; // 5 MiB S3 minimum
+        const MAX_PARTS = 10000; // S3 maximum number of parts
+
+        if (!Number.isFinite(totalSize) || totalSize <= 0) {
+          return MIN_CHUNK;
         }
 
-        const requiredSize = Math.ceil(fileSize / MAX_MULTIPART_PARTS);
-        const targetSize = Math.max(MIN_CHUNK_SIZE, requiredSize);
-        const oneMiB = 1024 * 1024;
-        return Math.ceil(targetSize / oneMiB) * oneMiB;
+        const estimatedSize = Math.ceil(totalSize / MAX_PARTS);
+        return Math.max(MIN_CHUNK, estimatedSize);
       }
 
       function buildBreadcrumb(prefix) {
@@ -628,13 +626,32 @@
           uploadStatusEl.textContent = 'Multipart uploads unavailable';
         }
 
-        uppy.on('complete', async () => {
-          statusEl.textContent = 'Upload complete';
-          await loadPrefix(currentPrefix);
+        uppy.on('upload-error', (file, error, response) => {
+          console.error('Uppy upload-error', { file, error, response });
+          if (statusEl) {
+            statusEl.textContent = `Upload error for ${file?.name || 'file'}: ${error?.message || error}`;
+          }
+          alert(`Upload error for ${file?.name || 'file'}: ${error?.message || error}`);
         });
 
         uppy.on('error', (error) => {
-          statusEl.textContent = `Upload error: ${error.message}`;
+          console.error('Uppy error', error);
+          if (statusEl) {
+            statusEl.textContent = `Upload error: ${error?.message || error}`;
+          }
+        });
+
+        uppy.on('retry-all', () => {
+          console.warn('Uppy retrying all parts');
+        });
+
+        uppy.on('upload-retry', (fileId) => {
+          console.warn('Uppy retrying file', fileId);
+        });
+
+        uppy.on('complete', async () => {
+          statusEl.textContent = 'Upload complete';
+          await loadPrefix(currentPrefix);
         });
       } else {
         if (selectFilesBtn) {
