@@ -13,7 +13,7 @@ A password-protected, self-hosted dashboard to browse Hetzner Object Storage buc
 
 ## Architecture overview
 
-The application is a Node.js (Express) service that exposes REST endpoints for listing objects, creating prefixes, and orchestrating multipart uploads with the AWS SDK v3. The browser UI (built with vanilla JS and Uppy) requests presigned URLs from the server and uploads file parts directly to Hetzner Object Storage. This keeps the server lightweight and avoids proxying large payloads.
+The application is a Node.js (Express) service that exposes REST endpoints for listing objects, creating prefixes, and orchestrating multipart uploads with the AWS SDK v3. The browser UI uses a first-party multipart uploader (written in vanilla JavaScript) that requests presigned URLs from the server and uploads file parts directly to Hetzner Object Storage. This keeps the server lightweight and avoids proxying large payloads while ensuring the client captures ETags for every part.
 
 ```
 Browser ⇄ Express server ⇄ Hetzner S3 (presigned requests)
@@ -21,7 +21,7 @@ Browser ⇄ Express server ⇄ Hetzner S3 (presigned requests)
 
 ## Required environment variables
 
-Create a `.env` file (or configure variables within Coolify) using the template below:
+Create a `.env` (or `.env.local`) file (or configure variables within Coolify) using the template below:
 
 ```env
 S3_ENDPOINT=https://s3.eu-central-2.hetzner.cloud
@@ -33,6 +33,9 @@ ADMIN_PASSWORD=change-me
 PORT=3000
 FORCE_PATH_STYLE=true
 TRUST_PROXY=true
+# Optional multipart tuning
+UPLOAD_PART_SIZE_BYTES=8388608
+UPLOAD_MAX_CONCURRENCY=4
 # Optional: uncomment to enable structured log file output
 # LOG_FILE=/var/log/s3-upload-platform/server.log
 ```
@@ -46,6 +49,10 @@ TRUST_PROXY=true
 - `FORCE_PATH_STYLE` (optional): Set to `true` to enable path-style requests (recommended for Hetzner).
 - `TRUST_PROXY` (optional): Overrides Express's [`trust proxy`](https://expressjs.com/en/guide/behind-proxies.html) setting. Defaults to `true` so deployments behind load balancers or reverse proxies correctly honour `X-Forwarded-*` headers. Set to `false` to disable or provide a numeric/string value to match your topology.
 - `LOG_FILE` (optional): Absolute or relative path to a writable file. When set, the server continues logging to stdout/stderr and also appends timestamped entries to the specified file, making it easier to inspect request and S3 activity after the fact.
+- `UPLOAD_PART_SIZE_BYTES` (optional): Overrides the multipart part size used by the client (defaults to 8 MiB, but the server will never allow values below S3's 5 MiB minimum).
+- `UPLOAD_MAX_CONCURRENCY` (optional): Caps how many parts the client uploads in parallel (defaults to 4).
+
+> ℹ️ Ensure your Hetzner bucket CORS policy exposes the `ETag`, `x-amz-request-id`, and `x-amz-id-2` headers so the browser can read multipart upload responses.
 
 ## Getting started locally
 

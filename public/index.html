@@ -8,7 +8,6 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
     />
-    <link rel="stylesheet" href="/vendor/uppy/uppy.min.css" />
     <style>
       :root {
         color-scheme: light dark;
@@ -212,10 +211,30 @@
         flex: 0 0 auto;
       }
 
-      #uppy-dashboard {
-        border-radius: 16px;
+      .progress {
+        position: relative;
+        width: 100%;
+        height: 0.75rem;
+        border-radius: 999px;
         overflow: hidden;
-        background: rgba(15, 23, 42, 0.4);
+        background: rgba(148, 163, 184, 0.2);
+      }
+
+      .progress-bar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100%;
+        width: 0;
+        border-radius: inherit;
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        transition: width 0.2s ease;
+      }
+
+      .progress-label {
+        margin-top: 0.5rem;
+        font-size: 0.9rem;
+        color: rgba(226, 232, 240, 0.9);
       }
 
       @media (max-width: 720px) {
@@ -302,13 +321,16 @@
         <h2>Upload files</h2>
         <div class="upload-actions">
           <button class="primary" type="button" id="select-files-btn">Select files</button>
+          <button type="button" id="cancel-upload-btn" disabled>Cancel upload</button>
         </div>
+        <input type="file" id="file-input" hidden />
         <p class="status" id="upload-status" hidden></p>
-        <div id="uppy-dashboard"></div>
+        <div class="progress" id="upload-progress" hidden>
+          <div class="progress-bar" id="upload-progress-bar"></div>
+        </div>
+        <div class="progress-label" id="upload-progress-label" hidden>0%</div>
       </section>
     </main>
-
-    <script src="/vendor/uppy/uppy.min.js"></script>
     <script>
       const listingBody = document.getElementById('listing-body');
       const cardList = document.getElementById('card-list');
@@ -351,16 +373,226 @@
         return date.toLocaleString();
       }
 
-      function calculateChunkSize(totalSize) {
-        const MIN_CHUNK = 5 * 1024 * 1024; // 5 MiB S3 minimum
-        const MAX_PARTS = 10000; // S3 maximum number of parts
+      const uploadConfigPromise = (async () => {
+        try {
+          const response = await fetch('/api/upload-config', { cache: 'no-store' });
+          if (!response.ok) {
+            throw new Error(`Failed to fetch upload config: ${response.status}`);
+          }
+          const data = await response.json();
+          const partSize = Number(data.partSizeBytes);
+          const concurrency = Number(data.maxConcurrency);
+          const resolvedPartSize = Number.isFinite(partSize) && partSize > 0
+            ? partSize
+            : 8 * 1024 * 1024;
+          const resolvedConcurrency = Number.isFinite(concurrency) && concurrency > 0
+            ? Math.floor(concurrency)
+            : 4;
+          return {
+            partSizeBytes: Math.max(resolvedPartSize, 5 * 1024 * 1024),
+            maxConcurrency: Math.max(resolvedConcurrency, 1)
+          };
+        } catch (error) {
+          console.warn('Falling back to default upload configuration', error);
+          return {
+            partSizeBytes: 8 * 1024 * 1024,
+            maxConcurrency: 4
+          };
+        }
+      })();
 
-        if (!Number.isFinite(totalSize) || totalSize <= 0) {
-          return MIN_CHUNK;
+      async function postJson(url, payload, signal) {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal
+        });
+
+        if (!response.ok) {
+          throw new Error(`${url} failed with status ${response.status}`);
         }
 
-        const estimatedSize = Math.ceil(totalSize / MAX_PARTS);
-        return Math.max(MIN_CHUNK, estimatedSize);
+        return response.json();
+      }
+
+      function sliceFile(file, start, end) {
+        if (typeof file.slice === 'function') {
+          return file.slice(start, end);
+        }
+        return file.webkitSlice(start, end);
+      }
+
+      async function multipartUpload(file, key, options = {}) {
+        const { onProgress, onPartComplete, onInitiated, signal } = options;
+        const config = await uploadConfigPromise;
+        const partSize = config.partSizeBytes;
+        const maxConcurrency = config.maxConcurrency;
+
+        const total = file.size;
+        const contentType = file.type || 'application/octet-stream';
+
+        const init = await postJson('/api/create-multipart', {
+          key,
+          contentType,
+          metadata: {
+            'x-amz-meta-origin': 'web',
+            'x-amz-meta-filename': file.name
+          }
+        }, signal);
+
+        const uploadId = init.uploadId;
+        if (typeof onInitiated === 'function') {
+          onInitiated({ uploadId });
+        }
+
+        const partCount = Math.max(1, Math.ceil(total / partSize));
+        const partsMap = new Map();
+        let uploadedBytes = 0;
+
+        const resumeKey = `mpu:${key}:${uploadId}`;
+        let completedMap = {};
+        try {
+          const saved = localStorage.getItem(resumeKey);
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            if (parsed && typeof parsed === 'object') {
+              completedMap = parsed;
+            }
+          }
+        } catch (error) {
+          console.warn('Failed to read multipart resume state', error);
+        }
+
+        const queue = [];
+        for (let partNumber = 1; partNumber <= partCount; partNumber += 1) {
+          const start = (partNumber - 1) * partSize;
+          const end = Math.min(start + partSize, total);
+          const chunkSize = end - start;
+          const cachedEtag = completedMap[partNumber];
+          if (cachedEtag) {
+            partsMap.set(partNumber, { PartNumber: partNumber, ETag: cachedEtag });
+            uploadedBytes += chunkSize;
+          } else {
+            queue.push(partNumber);
+          }
+        }
+
+        if (uploadedBytes > 0 && typeof onProgress === 'function') {
+          onProgress({ bytesUploaded: uploadedBytes, bytesTotal: total });
+        }
+
+        const persistResumeState = () => {
+          try {
+            localStorage.setItem(resumeKey, JSON.stringify(completedMap));
+          } catch (error) {
+            console.warn('Failed to persist multipart state', error);
+          }
+        };
+
+        const removeResumeState = () => {
+          try {
+            localStorage.removeItem(resumeKey);
+          } catch (error) {
+            console.warn('Failed to remove multipart state', error);
+          }
+        };
+
+        async function uploadSinglePart(partNumber) {
+          if (signal?.aborted) {
+            throw new DOMException('Upload aborted', 'AbortError');
+          }
+
+          const start = (partNumber - 1) * partSize;
+          const end = Math.min(start + partSize, total);
+          const blob = sliceFile(file, start, end);
+
+          const { url } = await postJson('/api/sign-part', {
+            key,
+            uploadId,
+            partNumber
+          }, signal);
+
+          const putResponse = await fetch(url, {
+            method: 'PUT',
+            body: blob,
+            signal
+          });
+
+          if (!putResponse.ok) {
+            throw new Error(`Part ${partNumber} upload failed with status ${putResponse.status}`);
+          }
+
+          const etag = putResponse.headers.get('etag');
+          if (!etag) {
+            throw new Error(`Missing ETag for part ${partNumber}. Verify bucket CORS ExposeHeaders.`);
+          }
+
+          partsMap.set(partNumber, { PartNumber: partNumber, ETag: etag });
+          completedMap[partNumber] = etag;
+          persistResumeState();
+
+          uploadedBytes += blob.size;
+          if (typeof onProgress === 'function') {
+            onProgress({ bytesUploaded: uploadedBytes, bytesTotal: total, partNumber });
+          }
+          if (typeof onPartComplete === 'function') {
+            onPartComplete({ PartNumber: partNumber, ETag: etag, uploadId });
+          }
+        }
+
+        const workers = Array.from({ length: maxConcurrency }).map(async () => {
+          while (queue.length > 0) {
+            const partNumber = queue.shift();
+            if (partNumber === undefined) {
+              break;
+            }
+
+            let attempt = 0;
+            while (true) {
+              try {
+                await uploadSinglePart(partNumber);
+                break;
+              } catch (error) {
+                attempt += 1;
+                if (signal?.aborted || error?.name === 'AbortError' || attempt >= 5) {
+                  throw error;
+                }
+                const backoff = Math.min(attempt * 1000, 5000);
+                await new Promise((resolve) => setTimeout(resolve, backoff));
+              }
+            }
+          }
+        });
+
+        try {
+          await Promise.all(workers);
+        } catch (error) {
+          if (signal?.aborted || error?.name === 'AbortError') {
+            try {
+              await postJson('/api/abort-multipart', { key, uploadId });
+            } catch (abortError) {
+              console.warn('Failed to abort multipart upload', abortError);
+            }
+            removeResumeState();
+            throw new DOMException('Upload aborted', 'AbortError');
+          }
+          throw error;
+        }
+
+        if (partsMap.size !== partCount) {
+          throw new Error('Upload did not complete all parts');
+        }
+
+        const orderedParts = Array.from(partsMap.values()).sort((a, b) => a.PartNumber - b.PartNumber);
+        const completion = await postJson('/api/complete-multipart', {
+          key,
+          uploadId,
+          parts: orderedParts
+        }, signal);
+
+        removeResumeState();
+        return { ...completion, uploadId };
       }
 
       function buildBreadcrumb(prefix) {
@@ -527,141 +759,151 @@
 
       navigate('');
 
-      const uppyNamespace = window.Uppy;
-      const UppyConstructor = uppyNamespace && (uppyNamespace.Uppy || uppyNamespace.Core);
+      const cancelUploadBtn = document.getElementById('cancel-upload-btn');
+      const fileInput = document.getElementById('file-input');
+      const progressContainer = document.getElementById('upload-progress');
+      const progressBar = document.getElementById('upload-progress-bar');
+      const progressLabel = document.getElementById('upload-progress-label');
 
-      if (typeof UppyConstructor === 'function' && uppyNamespace) {
-        const uppy = new UppyConstructor({
-          allowMultipleUploads: true,
-          restrictions: { maxFileSize: null }
-        });
+      let activeUploadController = null;
+      let activeUploadKey = null;
+      let activeUploadId = null;
 
-        let dashboardAvailable = false;
-        if (uppyNamespace.Dashboard) {
-          uppy.use(uppyNamespace.Dashboard, {
-            inline: true,
-            target: '#uppy-dashboard',
-            height: 360,
-            theme: 'dark',
-            note: 'Uploads stream directly to Hetzner S3 via multipart uploads.'
-          });
-          dashboardAvailable = true;
-        }
-
-        if (selectFilesBtn) {
-          if (dashboardAvailable) {
-            selectFilesBtn.addEventListener('click', () => {
-              const dashboard = uppy.getPlugin('Dashboard');
-              if (dashboard && typeof dashboard.openFileDialog === 'function') {
-                dashboard.openFileDialog();
-              } else {
-                const fileInput = document.querySelector('#uppy-dashboard input[type="file"]');
-                if (fileInput) {
-                  fileInput.click();
-                }
-              }
-            });
-          } else {
-            selectFilesBtn.disabled = true;
-            selectFilesBtn.setAttribute('aria-disabled', 'true');
-          }
-        }
-
-        if (uppyNamespace.AwsS3Multipart) {
-          uppy.use(uppyNamespace.AwsS3Multipart, {
-            limit: 5,
-            getChunkSize(file) {
-              return calculateChunkSize(file.size);
-            },
-            async createMultipartUpload(file) {
-              const key = `${currentPrefix}${file.name}`;
-              const response = await fetch('/api/create-multipart', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ key, contentType: file.type || 'application/octet-stream' })
-              });
-
-              if (!response.ok) {
-                throw new Error('Failed to initialize multipart upload');
-              }
-
-              return response.json();
-            },
-          async signPart(file, { uploadId, key, partNumber }) {
-            const params = new URLSearchParams({ key, uploadId, partNumber: String(partNumber) });
-            const response = await fetch(`/api/sign-part?${params.toString()}`, {
-              method: 'GET',
-              cache: 'no-store'
-            });
-            if (!response.ok) {
-              throw new Error('Failed to sign part');
-            }
-            const data = await response.json();
-            return data;
-          },
-          async completeMultipartUpload(file, { uploadId, key, parts }) {
-            const response = await fetch('/api/complete-multipart', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ uploadId, key, parts })
-            });
-
-            if (!response.ok) {
-              throw new Error('Failed to finalize upload');
-            }
-
-            return response.json();
-          },
-          async abortMultipartUpload(file, { uploadId, key }) {
-            await fetch('/api/abort-multipart', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ uploadId, key })
-            });
-          }
-          });
-        }
-        if (!uppyNamespace.AwsS3Multipart && uploadStatusEl) {
+      function showUploadStatus(message) {
+        if (uploadStatusEl) {
           uploadStatusEl.hidden = false;
-          uploadStatusEl.textContent = 'Multipart uploads unavailable';
+          uploadStatusEl.textContent = message;
+        }
+      }
+
+      function updateProgress(percent) {
+        if (progressContainer) {
+          progressContainer.hidden = false;
+        }
+        if (progressBar) {
+          progressBar.style.width = `${percent}%`;
+        }
+        if (progressLabel) {
+          progressLabel.hidden = false;
+          progressLabel.textContent = `${percent}%`;
+        }
+      }
+
+      function resetUploadState() {
+        if (selectFilesBtn) {
+          selectFilesBtn.disabled = false;
+          selectFilesBtn.removeAttribute('aria-disabled');
+        }
+        if (cancelUploadBtn) {
+          cancelUploadBtn.disabled = true;
+        }
+        if (fileInput) {
+          fileInput.value = '';
+        }
+        if (progressContainer) {
+          progressContainer.hidden = true;
+        }
+        if (progressBar) {
+          progressBar.style.width = '0%';
+        }
+        if (progressLabel) {
+          progressLabel.hidden = true;
+          progressLabel.textContent = '0%';
+        }
+      }
+
+      resetUploadState();
+
+      async function handleFileSelection(file) {
+        if (!file) {
+          return;
         }
 
-        uppy.on('upload-error', (file, error, response) => {
-          console.error('Uppy upload-error', { file, error, response });
-          if (statusEl) {
-            statusEl.textContent = `Upload error for ${file?.name || 'file'}: ${error?.message || error}`;
-          }
-          alert(`Upload error for ${file?.name || 'file'}: ${error?.message || error}`);
-        });
+        if (activeUploadController) {
+          activeUploadController.abort();
+        }
 
-        uppy.on('error', (error) => {
-          console.error('Uppy error', error);
-          if (statusEl) {
-            statusEl.textContent = `Upload error: ${error?.message || error}`;
-          }
-        });
+        const key = `${currentPrefix}${file.name}`;
+        const controller = new AbortController();
+        activeUploadController = controller;
+        activeUploadKey = key;
+        activeUploadId = null;
 
-        uppy.on('retry-all', () => {
-          console.warn('Uppy retrying all parts');
-        });
-
-        uppy.on('upload-retry', (fileId) => {
-          console.warn('Uppy retrying file', fileId);
-        });
-
-        uppy.on('complete', async () => {
-          statusEl.textContent = 'Upload complete';
-          await loadPrefix(currentPrefix);
-        });
-      } else {
         if (selectFilesBtn) {
           selectFilesBtn.disabled = true;
           selectFilesBtn.setAttribute('aria-disabled', 'true');
         }
-        if (uploadStatusEl) {
-          uploadStatusEl.hidden = false;
-          uploadStatusEl.textContent = 'Uploads unavailable';
+        if (cancelUploadBtn) {
+          cancelUploadBtn.disabled = false;
         }
+
+        updateProgress(0);
+        showUploadStatus(`Preparing upload for ${file.name}…`);
+
+        try {
+          const result = await multipartUpload(file, key, {
+            signal: controller.signal,
+            onInitiated: ({ uploadId }) => {
+              activeUploadId = uploadId;
+            },
+            onProgress: ({ bytesUploaded, bytesTotal }) => {
+              const percent = bytesTotal === 0 ? 0 : Math.round((bytesUploaded / bytesTotal) * 100);
+              updateProgress(percent);
+              showUploadStatus(`Uploading ${file.name} (${percent}%)`);
+            }
+          });
+
+          const location = result.location || result.key || key;
+          updateProgress(100);
+          showUploadStatus(`Upload complete: ${location}`);
+          if (cancelUploadBtn) {
+            cancelUploadBtn.disabled = true;
+          }
+          await loadPrefix(currentPrefix);
+        } catch (error) {
+          if (error?.name === 'AbortError') {
+            showUploadStatus('Upload cancelled');
+          } else {
+            console.error('Upload failed', error);
+            showUploadStatus(`Upload failed: ${error?.message || error}`);
+            if (activeUploadId && activeUploadKey) {
+              try {
+                await postJson('/api/abort-multipart', { key: activeUploadKey, uploadId: activeUploadId });
+              } catch (abortError) {
+                console.warn('Failed to clean up multipart upload', abortError);
+              }
+            }
+          }
+        } finally {
+          activeUploadController = null;
+          activeUploadKey = null;
+          activeUploadId = null;
+          resetUploadState();
+        }
+      }
+
+      if (selectFilesBtn && fileInput) {
+        selectFilesBtn.addEventListener('click', () => {
+          fileInput.click();
+        });
+      }
+
+      if (fileInput) {
+        fileInput.addEventListener('change', (event) => {
+          const file = event.target.files && event.target.files[0];
+          if (file) {
+            handleFileSelection(file);
+          }
+        });
+      }
+
+      if (cancelUploadBtn) {
+        cancelUploadBtn.addEventListener('click', () => {
+          if (activeUploadController) {
+            cancelUploadBtn.disabled = true;
+            activeUploadController.abort();
+          }
+        });
       }
     </script>
   </body>
