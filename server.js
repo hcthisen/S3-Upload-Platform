@@ -192,14 +192,20 @@ app.post('/api/create-multipart', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'Invalid key' });
   }
 
+  const objectKey = key;
+
   const command = new CreateMultipartUploadCommand({
     Bucket: S3_BUCKET,
-    Key: key,
+    Key: objectKey,
     ContentType: contentType
   });
 
   const response = await s3Client.send(command);
-  res.status(201).json({ uploadId: response.UploadId, key: response.Key });
+  if (!response?.UploadId) {
+    throw new Error('Failed to create multipart upload: missing UploadId');
+  }
+
+  res.status(201).json({ uploadId: response.UploadId, key: objectKey });
 }));
 
 app.get('/api/sign-part', asyncHandler(async (req, res) => {
