@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S3 Upload Platform</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@uppy/core@3.9.0/dist/style.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@uppy/dashboard@3.7.1/dist/style.min.css">
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <!-- Login Screen -->
+    <div id="login-screen" class="screen">
+        <div class="login-container">
+            <h1>S3 Upload Platform</h1>
+            <p class="subtitle">Hetzner S3 Storage Manager</p>
+            <form id="login-form">
+                <input type="password" id="password-input" placeholder="Enter password" required>
+                <button type="submit">Login</button>
+            </form>
+            <div id="login-error" class="error-message"></div>
+        </div>
+    </div>
+
+    <!-- Dashboard Screen -->
+    <div id="dashboard-screen" class="screen" style="display: none;">
+        <header>
+            <div class="header-content">
+                <h1>S3 Upload Platform</h1>
+                <button id="logout-btn" class="btn-secondary">Logout</button>
+            </div>
+        </header>
+
+        <main>
+            <div class="controls">
+                <div class="breadcrumb">
+                    <span class="breadcrumb-home" data-path="">🏠 Home</span>
+                    <span id="breadcrumb-path"></span>
+                </div>
+                <div class="action-buttons">
+                    <button id="new-folder-btn" class="btn-primary">+ New Folder</button>
+                    <button id="upload-btn" class="btn-primary">📤 Upload Files</button>
+                </div>
+            </div>
+
+            <div id="file-browser" class="file-browser">
+                <div class="loading">Loading...</div>
+            </div>
+
+            <!-- Upload Modal -->
+            <div id="upload-modal" class="modal">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h2>Upload Files</h2>
+                        <button class="close-btn" id="close-upload-modal">&times;</button>
+                    </div>
+                    <div id="uppy-dashboard"></div>
+                </div>
+            </div>
+
+            <!-- New Folder Modal -->
+            <div id="folder-modal" class="modal">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h2>Create New Folder</h2>
+                        <button class="close-btn" id="close-folder-modal">&times;</button>
+                    </div>
+                    <form id="folder-form">
+                        <input type="text" id="folder-name" placeholder="Folder name" required>
+                        <div class="modal-buttons">
+                            <button type="submit" class="btn-primary">Create</button>
+                            <button type="button" class="btn-secondary cancel-btn">Cancel</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/@uppy/core@3.9.0/dist/uppy.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@uppy/dashboard@3.7.1/dist/uppy.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@uppy/aws-s3@3.5.0/dist/uppy.min.js"></script>
+    <script src="/app.js"></script>
+</body>
+</html>
