@@ -337,6 +337,9 @@
         cardList.innerHTML = '';
       }
 
+      const MIN_CHUNK_SIZE = 5 * 1024 * 1024; // 5 MiB
+      const MAX_MULTIPART_PARTS = 10000;
+
       function formatBytes(bytes) {
         if (bytes === 0) return '0 B';
         if (!bytes && bytes !== 0) return '-';
@@ -349,6 +352,17 @@
         if (!value) return '-';
         const date = new Date(value);
         return date.toLocaleString();
+      }
+
+      function calculateChunkSize(fileSize) {
+        if (!Number.isFinite(fileSize) || fileSize <= 0) {
+          return MIN_CHUNK_SIZE;
+        }
+
+        const requiredSize = Math.ceil(fileSize / MAX_MULTIPART_PARTS);
+        const targetSize = Math.max(MIN_CHUNK_SIZE, requiredSize);
+        const oneMiB = 1024 * 1024;
+        return Math.ceil(targetSize / oneMiB) * oneMiB;
       }
 
       function buildBreadcrumb(prefix) {
@@ -558,6 +572,9 @@
         if (uppyNamespace.AwsS3Multipart) {
           uppy.use(uppyNamespace.AwsS3Multipart, {
             limit: 5,
+            getChunkSize(file) {
+              return calculateChunkSize(file.size);
+            },
             async createMultipartUpload(file) {
               const key = `${currentPrefix}${file.name}`;
               const response = await fetch('/api/create-multipart', {
