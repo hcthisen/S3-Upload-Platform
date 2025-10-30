@@ -33,6 +33,8 @@ ADMIN_PASSWORD=change-me
 PORT=3000
 FORCE_PATH_STYLE=true
 TRUST_PROXY=true
+# Optional: uncomment to enable structured log file output
+# LOG_FILE=/var/log/s3-upload-platform/server.log
 ```
 
 - `S3_ENDPOINT`: Hetzner object storage endpoint URL.
@@ -43,6 +45,7 @@ TRUST_PROXY=true
 - `PORT` (optional): Port that the Express server listens on (defaults to 3000).
 - `FORCE_PATH_STYLE` (optional): Set to `true` to enable path-style requests (recommended for Hetzner).
 - `TRUST_PROXY` (optional): Overrides Express's [`trust proxy`](https://expressjs.com/en/guide/behind-proxies.html) setting. Defaults to `true` so deployments behind load balancers or reverse proxies correctly honour `X-Forwarded-*` headers. Set to `false` to disable or provide a numeric/string value to match your topology.
+- `LOG_FILE` (optional): Absolute or relative path to a writable file. When set, the server continues logging to stdout/stderr and also appends timestamped entries to the specified file, making it easier to inspect request and S3 activity after the fact.
 
 ## Getting started locally
 

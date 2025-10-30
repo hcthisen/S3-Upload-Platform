@@ -1,6 +1,8 @@
 import express from 'express';
 import helmet from 'helmet';
 import basicAuth from 'express-basic-auth';
+import fs from 'fs';
+import path from 'path';
 import {
   S3Client,
   ListObjectsV2Command,
@@ -52,6 +54,87 @@ const FORCE_PATH_STYLE = process.env.FORCE_PATH_STYLE;
 const PORT = process.env.PORT || 3000;
 const TRUST_PROXY = process.env.TRUST_PROXY;
 
+const serializeError = (error) => ({
+  name: error?.name,
+  message: error?.message,
+  stack: error?.stack,
+  statusCode: error?.statusCode,
+  retryable: error?.retryable,
+  code: error?.code,
+  $metadata: error?.$metadata
+});
+
+const LOG_FILE = typeof process.env.LOG_FILE === 'string' && process.env.LOG_FILE.trim().length > 0
+  ? process.env.LOG_FILE.trim()
+  : null;
+
+let logStream = null;
+
+const writeLogLine = (level, message, meta) => {
+  if (!logStream) {
+    return;
+  }
+
+  const metaString = Object.keys(meta).length > 0 ? ` ${JSON.stringify(meta)}` : '';
+  const line = `[${new Date().toISOString()}] [${level}] ${message}${metaString}\n`;
+  logStream.write(line);
+};
+
+if (LOG_FILE) {
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
+    logStream.on('error', (streamError) => {
+      const streamMeta = { logFile: LOG_FILE, error: serializeError(streamError) };
+      console.error('[ERROR] Log stream error', JSON.stringify(streamMeta));
+    });
+    console.log('[INFO] File logging enabled', JSON.stringify({ logFile: LOG_FILE }));
+    writeLogLine('INFO', 'File logging enabled', { logFile: LOG_FILE });
+  } catch (error) {
+    const errorMeta = { logFile: LOG_FILE, error: serializeError(error) };
+    console.error('[ERROR] Failed to initialize log file', JSON.stringify(errorMeta));
+  }
+}
+
+const logToConsole = (method, level, message, meta) => {
+  const metaString = Object.keys(meta).length > 0 ? JSON.stringify(meta) : '';
+  if (metaString) {
+    console[method](`[${level}] ${message}`, metaString);
+  } else {
+    console[method](`[${level}] ${message}`);
+  }
+};
+
+const logger = {
+  info: (message, meta = {}) => {
+    logToConsole('log', 'INFO', message, meta);
+    writeLogLine('INFO', message, meta);
+  },
+  warn: (message, meta = {}) => {
+    logToConsole('warn', 'WARN', message, meta);
+    writeLogLine('WARN', message, meta);
+  },
+  error: (message, meta = {}) => {
+    logToConsole('error', 'ERROR', message, meta);
+    writeLogLine('ERROR', message, meta);
+  }
+};
+
+const closeLogStream = () => {
+  if (logStream) {
+    logStream.end();
+    logStream = null;
+  }
+};
+
+process.on('exit', closeLogStream);
+['SIGINT', 'SIGTERM'].forEach((signal) => {
+  process.on(signal, () => {
+    closeLogStream();
+    process.exit(0);
+  });
+});
+
 const parseTrustProxy = (value) => {
   if (value === undefined) {
     return true;
@@ -83,28 +166,6 @@ const s3Client = new S3Client({
   forcePathStyle: FORCE_PATH_STYLE ? FORCE_PATH_STYLE.toLowerCase() === 'true' : true
 });
 
-const logger = {
-  info: (message, meta = {}) => {
-    console.log(`[INFO] ${message}`, Object.keys(meta).length ? JSON.stringify(meta) : '');
-  },
-  warn: (message, meta = {}) => {
-    console.warn(`[WARN] ${message}`, Object.keys(meta).length ? JSON.stringify(meta) : '');
-  },
-  error: (message, meta = {}) => {
-    console.error(`[ERROR] ${message}`, Object.keys(meta).length ? JSON.stringify(meta) : '');
-  }
-};
-
-const serializeError = (error) => ({
-  name: error?.name,
-  message: error?.message,
-  stack: error?.stack,
-  statusCode: error?.statusCode,
-  retryable: error?.retryable,
-  code: error?.code,
-  $metadata: error?.$metadata
-});
-
 const app = express();
 
 const containsTraversal = (value) => value.includes('..');
@@ -115,7 +176,8 @@ app.set('trust proxy', trustProxySetting);
 logger.info('Server configuration', {
   s3Endpoint: S3_ENDPOINT,
   s3Bucket: S3_BUCKET,
-  trustProxy: app.get('trust proxy')
+  trustProxy: app.get('trust proxy'),
+  logFile: LOG_FILE || null
 });
 app.use(helmet({
   contentSecurityPolicy: false
