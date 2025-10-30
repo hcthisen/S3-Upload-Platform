@@ -306,6 +306,7 @@
         <div class="upload-actions">
           <button class="primary" type="button" id="select-files-btn">Select files</button>
         </div>
+        <p class="status" id="upload-status" hidden></p>
         <div id="uppy-dashboard"></div>
       </section>
     </main>
@@ -323,6 +324,7 @@
       const folderInput = document.getElementById('folder-name');
       const objectTable = document.getElementById('object-table');
       const selectFilesBtn = document.getElementById('select-files-btn');
+      const uploadStatusEl = document.getElementById('upload-status');
 
       let currentPrefix = '';
       let nextToken = null;
@@ -515,85 +517,96 @@
         }
       });
 
-      const uppy = new Uppy.Core({
-        allowMultipleUploads: true,
-        restrictions: { maxFileSize: null }
-      });
+      navigate('');
 
-      uppy.use(Uppy.Dashboard, {
-        inline: true,
-        target: '#uppy-dashboard',
-        height: 360,
-        theme: 'dark',
-        note: 'Uploads stream directly to Hetzner S3 via multipart uploads.'
-      });
-
-      if (selectFilesBtn) {
-        selectFilesBtn.addEventListener('click', () => {
-          const dashboard = uppy.getPlugin('Dashboard');
-          if (dashboard) {
-            dashboard.openFileDialog();
-          }
+      if (window.Uppy && window.Uppy.Core) {
+        const uppy = new Uppy.Core({
+          allowMultipleUploads: true,
+          restrictions: { maxFileSize: null }
         });
-      }
 
-      uppy.use(Uppy.AwsS3Multipart, {
-        limit: 5,
-        async createMultipartUpload(file) {
-          const key = `${currentPrefix}${file.name}`;
-          const response = await fetch('/api/create-multipart', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key, contentType: file.type || 'application/octet-stream' })
-          });
+        uppy.use(Uppy.Dashboard, {
+          inline: true,
+          target: '#uppy-dashboard',
+          height: 360,
+          theme: 'dark',
+          note: 'Uploads stream directly to Hetzner S3 via multipart uploads.'
+        });
 
-          if (!response.ok) {
-            throw new Error('Failed to initialize multipart upload');
-          }
-
-          return response.json();
-        },
-        async signPart(file, { uploadId, key, partNumber }) {
-          const params = new URLSearchParams({ key, uploadId, partNumber: String(partNumber) });
-          const response = await fetch(`/api/sign-part?${params.toString()}`);
-          if (!response.ok) {
-            throw new Error('Failed to sign part');
-          }
-          const data = await response.json();
-          return data.url;
-        },
-        async completeMultipartUpload(file, { uploadId, key, parts }) {
-          const response = await fetch('/api/complete-multipart', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uploadId, key, parts })
-          });
-
-          if (!response.ok) {
-            throw new Error('Failed to finalize upload');
-          }
-
-          return response.json();
-        },
-        async abortMultipartUpload(file, { uploadId, key }) {
-          await fetch('/api/abort-multipart', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uploadId, key })
+        if (selectFilesBtn) {
+          selectFilesBtn.addEventListener('click', () => {
+            const dashboard = uppy.getPlugin('Dashboard');
+            if (dashboard) {
+              dashboard.openFileDialog();
+            }
           });
         }
-      });
 
-      uppy.on('complete', async () => {
-        statusEl.textContent = 'Upload complete';
-        await loadPrefix(currentPrefix);
-      });
+        uppy.use(Uppy.AwsS3Multipart, {
+          limit: 5,
+          async createMultipartUpload(file) {
+            const key = `${currentPrefix}${file.name}`;
+            const response = await fetch('/api/create-multipart', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ key, contentType: file.type || 'application/octet-stream' })
+            });
 
-      uppy.on('error', (error) => {
-        statusEl.textContent = `Upload error: ${error.message}`;
-      });
+            if (!response.ok) {
+              throw new Error('Failed to initialize multipart upload');
+            }
 
-      navigate('');
+            return response.json();
+          },
+          async signPart(file, { uploadId, key, partNumber }) {
+            const params = new URLSearchParams({ key, uploadId, partNumber: String(partNumber) });
+            const response = await fetch(`/api/sign-part?${params.toString()}`);
+            if (!response.ok) {
+              throw new Error('Failed to sign part');
+            }
+            const data = await response.json();
+            return data.url;
+          },
+          async completeMultipartUpload(file, { uploadId, key, parts }) {
+            const response = await fetch('/api/complete-multipart', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ uploadId, key, parts })
+            });
+
+            if (!response.ok) {
+              throw new Error('Failed to finalize upload');
+            }
+
+            return response.json();
+          },
+          async abortMultipartUpload(file, { uploadId, key }) {
+            await fetch('/api/abort-multipart', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ uploadId, key })
+            });
+          }
+        });
+
+        uppy.on('complete', async () => {
+          statusEl.textContent = 'Upload complete';
+          await loadPrefix(currentPrefix);
+        });
+
+        uppy.on('error', (error) => {
+          statusEl.textContent = `Upload error: ${error.message}`;
+        });
+      } else {
+        if (selectFilesBtn) {
+          selectFilesBtn.disabled = true;
+          selectFilesBtn.setAttribute('aria-disabled', 'true');
+        }
+        if (uploadStatusEl) {
+          uploadStatusEl.hidden = false;
+          uploadStatusEl.textContent = 'Uploads unavailable';
+        }
+      }
     </script>
   </body>
 </html>
