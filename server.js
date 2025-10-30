@@ -54,6 +54,29 @@ const FORCE_PATH_STYLE = process.env.FORCE_PATH_STYLE;
 const PORT = process.env.PORT || 3000;
 const TRUST_PROXY = process.env.TRUST_PROXY;
 
+const parsePositiveInteger = (value, fallback) => {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.floor(parsed);
+};
+
+const MIN_PART_SIZE = 5 * 1024 * 1024;
+const DEFAULT_PART_SIZE = 8 * 1024 * 1024;
+const DEFAULT_CONCURRENCY = 4;
+
+const configuredPartSize = parsePositiveInteger(process.env.UPLOAD_PART_SIZE_BYTES, DEFAULT_PART_SIZE);
+const uploadConfig = {
+  partSizeBytes: Math.max(configuredPartSize, MIN_PART_SIZE),
+  maxConcurrency: parsePositiveInteger(process.env.UPLOAD_MAX_CONCURRENCY, DEFAULT_CONCURRENCY)
+};
+
 const serializeError = (error) => ({
   name: error?.name,
   message: error?.message,
@@ -177,7 +200,9 @@ logger.info('Server configuration', {
   s3Endpoint: S3_ENDPOINT,
   s3Bucket: S3_BUCKET,
   trustProxy: app.get('trust proxy'),
-  logFile: LOG_FILE || null
+  logFile: LOG_FILE || null,
+  uploadPartSizeBytes: uploadConfig.partSizeBytes,
+  uploadMaxConcurrency: uploadConfig.maxConcurrency
 });
 app.use(helmet({
   contentSecurityPolicy: false
@@ -192,6 +217,10 @@ app.use(
 );
 
 app.use(express.static('public', { fallthrough: true }));
+
+app.get('/api/upload-config', (req, res) => {
+  res.json(uploadConfig);
+});
 
 const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
@@ -315,7 +344,7 @@ app.post('/api/mkdir', asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/create-multipart', asyncHandler(async (req, res) => {
-  const { key, contentType } = req.body || {};
+  const { key, contentType, metadata } = req.body || {};
   if (!key || typeof key !== 'string') {
     return res.status(400).json({ error: 'key is required' });
   }
@@ -326,10 +355,25 @@ app.post('/api/create-multipart', asyncHandler(async (req, res) => {
 
   const objectKey = key;
 
+  let metadataPayload;
+  if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+    metadataPayload = Object.entries(metadata).reduce((acc, [metaKey, metaValue]) => {
+      if (typeof metaKey === 'string' && metaKey.trim().length > 0) {
+        acc[metaKey] = String(metaValue ?? '');
+      }
+      return acc;
+    }, {});
+
+    if (metadataPayload && Object.keys(metadataPayload).length === 0) {
+      metadataPayload = undefined;
+    }
+  }
+
   const command = new CreateMultipartUploadCommand({
     Bucket: S3_BUCKET,
     Key: objectKey,
-    ContentType: contentType
+    ContentType: contentType,
+    Metadata: metadataPayload
   });
 
   const response = await sendS3Command(command, { key: objectKey, contentType });
@@ -337,13 +381,13 @@ app.post('/api/create-multipart', asyncHandler(async (req, res) => {
     throw new Error('Failed to create multipart upload: missing UploadId');
   }
 
-  res.status(201).json({ uploadId: response.UploadId, key: objectKey });
+  res.status(201).json({ uploadId: response.UploadId, key: objectKey, bucket: S3_BUCKET });
 }));
 
-app.get('/api/sign-part', asyncHandler(async (req, res) => {
-  const { key, uploadId, partNumber } = req.query;
+app.post('/api/sign-part', asyncHandler(async (req, res) => {
+  const { key, uploadId, partNumber } = req.body || {};
 
-  if (!key || !uploadId || !partNumber) {
+  if (!key || !uploadId || partNumber === undefined || partNumber === null) {
     return res.status(400).json({ error: 'key, uploadId and partNumber are required' });
   }
 
@@ -377,7 +421,7 @@ app.get('/api/sign-part', asyncHandler(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
-  res.json({ url, method: 'PUT', headers: {} });
+  res.json({ url });
 }));
 
 app.post('/api/complete-multipart', asyncHandler(async (req, res) => {
@@ -392,11 +436,22 @@ app.post('/api/complete-multipart', asyncHandler(async (req, res) => {
   }
 
   const normalizedParts = parts
-    .map((part) => ({
-      ETag: String(part?.ETag ?? part?.etag ?? '').replace(/^W\//, '').replace(/"/g, ''),
-      PartNumber: Number(part?.PartNumber ?? part?.partNumber)
-    }))
-    .filter((part) => Boolean(part.ETag) && Number.isInteger(part.PartNumber) && part.PartNumber > 0)
+    .map((part) => {
+      const partNumber = Number(part?.PartNumber ?? part?.partNumber);
+      const etag = part?.ETag ?? part?.etag;
+      if (!Number.isInteger(partNumber) || partNumber <= 0) {
+        return null;
+      }
+      if (typeof etag !== 'string' || etag.trim().length === 0) {
+        return null;
+      }
+
+      return {
+        PartNumber: partNumber,
+        ETag: etag.trim()
+      };
+    })
+    .filter(Boolean)
     .sort((a, b) => a.PartNumber - b.PartNumber);
 
   if (normalizedParts.length === 0) {
@@ -421,7 +476,7 @@ app.post('/api/complete-multipart', asyncHandler(async (req, res) => {
     location: response.Location || null,
     bucket: response.Bucket || S3_BUCKET,
     key: response.Key || key,
-    etag: response.ETag ? response.ETag.replace(/^W\//, '').replace(/"/g, '') : null
+    etag: response.ETag || null
   });
 }));
 
@@ -443,7 +498,7 @@ app.post('/api/abort-multipart', asyncHandler(async (req, res) => {
   });
 
   await sendS3Command(command, { key, uploadId });
-  res.status(204).end();
+  res.json({ ok: true });
 }));
 
 app.use((err, req, res, next) => {
