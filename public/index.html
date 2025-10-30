@@ -579,7 +579,7 @@
               throw new Error('Failed to sign part');
             }
             const data = await response.json();
-            return data.url;
+            return data;
           },
           async completeMultipartUpload(file, { uploadId, key, parts }) {
             const response = await fetch('/api/complete-multipart', {
