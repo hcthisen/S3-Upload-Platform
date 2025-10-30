@@ -142,7 +142,7 @@ app.post('/api/folder', requireAuth, async (req, res) => {
     }
 
     // Sanitize the folder path
-    folderPath = String(folderPath).trim();
+    folderPath = folderPath.trim();
     
     // Ensure path ends with /
     const normalizedPath = folderPath.endsWith('/') ? folderPath : `${folderPath}/`;
@@ -169,7 +169,7 @@ app.post('/api/upload/init', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Filename is required and must be a string' });
     }
 
-    filename = String(filename).trim();
+    filename = filename.trim();
     filePath = filePath ? String(filePath).trim() : '';
     
     const key = filePath ? `${filePath}${filename}` : filename;
@@ -194,7 +194,7 @@ app.post('/api/upload/presign', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Key is required and must be a string' });
     }
 
-    key = String(key).trim();
+    key = key.trim();
     
     // Generate presigned URL for PUT operation
     const command = new PutObjectCommand({

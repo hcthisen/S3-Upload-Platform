@@ -158,11 +158,32 @@ The application uses a secure architecture where:
 
 ## Security Notes
 
-- Change the default `DASHBOARD_PASSWORD` immediately
-- Use a strong, random `SESSION_SECRET` in production
-- Use HTTPS in production (configure via reverse proxy like Nginx or Traefik)
-- Keep your S3 credentials secure and never commit them to version control
-- Consider using IAM roles with minimal required permissions
+### Authentication & Authorization
+- **Change the default `DASHBOARD_PASSWORD` immediately** - Use a strong, unique password
+- Use a **strong, random `SESSION_SECRET`** in production (min 32 characters)
+- Sessions expire after 24 hours of inactivity
+
+### Network Security
+- **Always use HTTPS in production** (configure via reverse proxy like Nginx or Traefik)
+- The application includes rate limiting:
+  - API endpoints: 100 requests per 15 minutes per IP
+  - Login endpoint: 5 attempts per 15 minutes per IP
+
+### Data Security
+- Keep your S3 credentials secure and **never commit them to version control**
+- Consider using IAM roles with minimal required permissions for your S3 bucket
+- Presigned URLs expire after 1 hour
+
+### Production Recommendations
+- Deploy behind a reverse proxy with HTTPS/TLS
+- Use environment variables for all sensitive configuration
+- Regularly update dependencies to patch security vulnerabilities
+- Monitor logs for suspicious activity
+- For enhanced security, consider implementing:
+  - Two-factor authentication (2FA)
+  - CSRF token validation for state-changing operations
+  - Web Application Firewall (WAF)
+  - IP whitelisting if access is from known locations
 
 ## License
 
