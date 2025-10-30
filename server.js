@@ -377,8 +377,7 @@ app.get('/api/sign-part', asyncHandler(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
-  res.removeHeader('ETag');
-  res.json({ url });
+  res.json({ url, method: 'PUT', headers: {} });
 }));
 
 app.post('/api/complete-multipart', asyncHandler(async (req, res) => {
@@ -392,15 +391,15 @@ app.post('/api/complete-multipart', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'Invalid key' });
   }
 
-  const formattedParts = parts
+  const normalizedParts = parts
     .map((part) => ({
-      ETag: part.ETag,
-      PartNumber: Number(part.PartNumber)
+      ETag: String(part?.ETag ?? part?.etag ?? '').replace(/^W\//, '').replace(/"/g, ''),
+      PartNumber: Number(part?.PartNumber ?? part?.partNumber)
     }))
-    .filter((part) => typeof part.ETag === 'string' && Number.isInteger(part.PartNumber) && part.PartNumber > 0)
+    .filter((part) => Boolean(part.ETag) && Number.isInteger(part.PartNumber) && part.PartNumber > 0)
     .sort((a, b) => a.PartNumber - b.PartNumber);
 
-  if (formattedParts.length === 0) {
+  if (normalizedParts.length === 0) {
     return res.status(400).json({ error: 'parts array must include valid PartNumber and ETag values' });
   }
 
@@ -409,16 +408,21 @@ app.post('/api/complete-multipart', asyncHandler(async (req, res) => {
     Key: key,
     UploadId: uploadId,
     MultipartUpload: {
-      Parts: formattedParts
+      Parts: normalizedParts
     }
   });
 
   const response = await sendS3Command(command, {
     key,
     uploadId,
-    partsCount: formattedParts.length
+    partsCount: normalizedParts.length
   });
-  res.json({ location: response.Location, bucket: response.Bucket, key: response.Key });
+  res.json({
+    location: response.Location || null,
+    bucket: response.Bucket || S3_BUCKET,
+    key: response.Key || key,
+    etag: response.ETag ? response.ETag.replace(/^W\//, '').replace(/"/g, '') : null
+  });
 }));
 
 app.post('/api/abort-multipart', asyncHandler(async (req, res) => {
