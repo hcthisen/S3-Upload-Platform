@@ -8,10 +8,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
     />
-    <link
-      rel="stylesheet"
-      href="https://releases.transloadit.com/uppy/v3.7.1/uppy.min.css"
-    />
+    <link rel="stylesheet" href="/vendor/uppy/uppy.min.css" />
     <style>
       :root {
         color-scheme: light dark;
@@ -311,8 +308,7 @@
       </section>
     </main>
 
-    <script src="https://releases.transloadit.com/uppy/v3.7.1/uppy.min.js"></script>
-    <script src="https://releases.transloadit.com/uppy/v3.7.1/aws-s3-multipart.min.js"></script>
+    <script src="/vendor/uppy/uppy.min.js"></script>
     <script>
       const listingBody = document.getElementById('listing-body');
       const cardList = document.getElementById('card-list');
@@ -519,45 +515,63 @@
 
       navigate('');
 
-      if (window.Uppy && window.Uppy.Core) {
-        const uppy = new Uppy.Core({
+      const uppyNamespace = window.Uppy;
+      const UppyConstructor = uppyNamespace && (uppyNamespace.Uppy || uppyNamespace.Core);
+
+      if (typeof UppyConstructor === 'function' && uppyNamespace) {
+        const uppy = new UppyConstructor({
           allowMultipleUploads: true,
           restrictions: { maxFileSize: null }
         });
 
-        uppy.use(Uppy.Dashboard, {
-          inline: true,
-          target: '#uppy-dashboard',
-          height: 360,
-          theme: 'dark',
-          note: 'Uploads stream directly to Hetzner S3 via multipart uploads.'
-        });
-
-        if (selectFilesBtn) {
-          selectFilesBtn.addEventListener('click', () => {
-            const dashboard = uppy.getPlugin('Dashboard');
-            if (dashboard) {
-              dashboard.openFileDialog();
-            }
+        let dashboardAvailable = false;
+        if (uppyNamespace.Dashboard) {
+          uppy.use(uppyNamespace.Dashboard, {
+            inline: true,
+            target: '#uppy-dashboard',
+            height: 360,
+            theme: 'dark',
+            note: 'Uploads stream directly to Hetzner S3 via multipart uploads.'
           });
+          dashboardAvailable = true;
         }
 
-        uppy.use(Uppy.AwsS3Multipart, {
-          limit: 5,
-          async createMultipartUpload(file) {
-            const key = `${currentPrefix}${file.name}`;
-            const response = await fetch('/api/create-multipart', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ key, contentType: file.type || 'application/octet-stream' })
+        if (selectFilesBtn) {
+          if (dashboardAvailable) {
+            selectFilesBtn.addEventListener('click', () => {
+              const dashboard = uppy.getPlugin('Dashboard');
+              if (dashboard && typeof dashboard.openFileDialog === 'function') {
+                dashboard.openFileDialog();
+              } else {
+                const fileInput = document.querySelector('#uppy-dashboard input[type="file"]');
+                if (fileInput) {
+                  fileInput.click();
+                }
+              }
             });
+          } else {
+            selectFilesBtn.disabled = true;
+            selectFilesBtn.setAttribute('aria-disabled', 'true');
+          }
+        }
 
-            if (!response.ok) {
-              throw new Error('Failed to initialize multipart upload');
-            }
+        if (uppyNamespace.AwsS3Multipart) {
+          uppy.use(uppyNamespace.AwsS3Multipart, {
+            limit: 5,
+            async createMultipartUpload(file) {
+              const key = `${currentPrefix}${file.name}`;
+              const response = await fetch('/api/create-multipart', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key, contentType: file.type || 'application/octet-stream' })
+              });
 
-            return response.json();
-          },
+              if (!response.ok) {
+                throw new Error('Failed to initialize multipart upload');
+              }
+
+              return response.json();
+            },
           async signPart(file, { uploadId, key, partNumber }) {
             const params = new URLSearchParams({ key, uploadId, partNumber: String(partNumber) });
             const response = await fetch(`/api/sign-part?${params.toString()}`);
@@ -587,7 +601,12 @@
               body: JSON.stringify({ uploadId, key })
             });
           }
-        });
+          });
+        }
+        if (!uppyNamespace.AwsS3Multipart && uploadStatusEl) {
+          uploadStatusEl.hidden = false;
+          uploadStatusEl.textContent = 'Multipart uploads unavailable';
+        }
 
         uppy.on('complete', async () => {
           statusEl.textContent = 'Upload complete';
