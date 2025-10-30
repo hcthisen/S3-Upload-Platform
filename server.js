@@ -3,6 +3,7 @@ const express = require('express');
 const session = require('express-session');
 const cookieParser = require('cookie-parser');
 const path = require('path');
+const rateLimit = require('express-rate-limit');
 const { S3Client, ListObjectsV2Command, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
@@ -23,6 +24,19 @@ const s3Client = new S3Client({
 const BUCKET_NAME = process.env.S3_BUCKET_NAME;
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || 'admin';
 
+// Rate limiting
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.',
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // Limit each IP to 5 login attempts per windowMs
+  message: 'Too many login attempts from this IP, please try again later.',
+});
+
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -40,6 +54,9 @@ app.use(session({
 // Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Apply rate limiting to all API routes
+app.use('/api', apiLimiter);
+
 // Authentication middleware
 const requireAuth = (req, res, next) => {
   if (req.session.authenticated) {
@@ -48,8 +65,8 @@ const requireAuth = (req, res, next) => {
   res.status(401).json({ error: 'Unauthorized' });
 };
 
-// Login endpoint
-app.post('/api/login', (req, res) => {
+// Login endpoint with stricter rate limiting
+app.post('/api/login', authLimiter, (req, res) => {
   const { password } = req.body;
   if (password === DASHBOARD_PASSWORD) {
     req.session.authenticated = true;
@@ -73,7 +90,13 @@ app.get('/api/auth/status', (req, res) => {
 // List objects in S3 bucket (with optional prefix)
 app.get('/api/objects', requireAuth, async (req, res) => {
   try {
-    const prefix = req.query.prefix || '';
+    // Ensure prefix is a string to prevent type confusion
+    let prefix = req.query.prefix || '';
+    if (Array.isArray(prefix)) {
+      prefix = prefix[0] || '';
+    }
+    prefix = String(prefix);
+    
     const command = new ListObjectsV2Command({
       Bucket: BUCKET_NAME,
       Prefix: prefix,
@@ -113,11 +136,14 @@ app.get('/api/objects', requireAuth, async (req, res) => {
 // Create folder (by creating an empty object with trailing slash)
 app.post('/api/folder', requireAuth, async (req, res) => {
   try {
-    const { path: folderPath } = req.body;
-    if (!folderPath) {
-      return res.status(400).json({ error: 'Folder path is required' });
+    let { path: folderPath } = req.body;
+    if (!folderPath || typeof folderPath !== 'string') {
+      return res.status(400).json({ error: 'Folder path is required and must be a string' });
     }
 
+    // Sanitize the folder path
+    folderPath = String(folderPath).trim();
+    
     // Ensure path ends with /
     const normalizedPath = folderPath.endsWith('/') ? folderPath : `${folderPath}/`;
 
@@ -138,11 +164,14 @@ app.post('/api/folder', requireAuth, async (req, res) => {
 // Initialize multipart upload
 app.post('/api/upload/init', requireAuth, async (req, res) => {
   try {
-    const { filename, path: filePath } = req.body;
-    if (!filename) {
-      return res.status(400).json({ error: 'Filename is required' });
+    let { filename, path: filePath } = req.body;
+    if (!filename || typeof filename !== 'string') {
+      return res.status(400).json({ error: 'Filename is required and must be a string' });
     }
 
+    filename = String(filename).trim();
+    filePath = filePath ? String(filePath).trim() : '';
+    
     const key = filePath ? `${filePath}${filename}` : filename;
 
     // For multipart upload, we'll use presigned URLs for each part
@@ -160,11 +189,13 @@ app.post('/api/upload/init', requireAuth, async (req, res) => {
 // Get presigned URL for uploading a file part
 app.post('/api/upload/presign', requireAuth, async (req, res) => {
   try {
-    const { key, partNumber } = req.body;
-    if (!key) {
-      return res.status(400).json({ error: 'Key is required' });
+    let { key, partNumber } = req.body;
+    if (!key || typeof key !== 'string') {
+      return res.status(400).json({ error: 'Key is required and must be a string' });
     }
 
+    key = String(key).trim();
+    
     // Generate presigned URL for PUT operation
     const command = new PutObjectCommand({
       Bucket: BUCKET_NAME,
