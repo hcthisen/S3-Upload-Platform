@@ -374,9 +374,11 @@ app.get('/api/sign-part', asyncHandler(async (req, res) => {
     uploadId,
     partNumber: partNum
   });
-  res.set('Cache-Control', 'no-store, max-age=0, must-revalidate');
-  res.set('Pragma', 'no-cache');
-  res.set('Expires', '0');
+  res.set({
+    'Cache-Control': 'no-store, max-age=0, must-revalidate',
+    Pragma: 'no-cache',
+    Expires: '0'
+  });
   res.removeHeader('ETag');
   res.json({ url });
 }));
