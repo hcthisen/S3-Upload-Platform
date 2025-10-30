@@ -115,7 +115,7 @@ app.get('/api/list', asyncHandler(async (req, res) => {
   const prefixParam = typeof req.query.prefix === 'string' ? req.query.prefix : '';
   let decodedPrefix = '';
   try {
-    decodedPrefix = decodeURIComponent(prefixParam);
+    decodedPrefix = decodeURIComponent(prefixParam.replace(/\+/g, ' '));
   } catch (error) {
     return res.status(400).json({ error: 'Invalid prefix encoding' });
   }

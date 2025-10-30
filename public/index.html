@@ -204,6 +204,17 @@
         background: rgba(56, 189, 248, 0.18);
       }
 
+      .upload-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+
+      .upload-actions button {
+        flex: 0 0 auto;
+      }
+
       #uppy-dashboard {
         border-radius: 16px;
         overflow: hidden;
@@ -292,6 +303,9 @@
 
       <section class="panel">
         <h2>Upload files</h2>
+        <div class="upload-actions">
+          <button class="primary" type="button" id="select-files-btn">Select files</button>
+        </div>
         <div id="uppy-dashboard"></div>
       </section>
     </main>
@@ -308,6 +322,7 @@
       const mkdirForm = document.getElementById('mkdir-form');
       const folderInput = document.getElementById('folder-name');
       const objectTable = document.getElementById('object-table');
+      const selectFilesBtn = document.getElementById('select-files-btn');
 
       let currentPrefix = '';
       let nextToken = null;
@@ -512,6 +527,15 @@
         theme: 'dark',
         note: 'Uploads stream directly to Hetzner S3 via multipart uploads.'
       });
+
+      if (selectFilesBtn) {
+        selectFilesBtn.addEventListener('click', () => {
+          const dashboard = uppy.getPlugin('Dashboard');
+          if (dashboard) {
+            dashboard.openFileDialog();
+          }
+        });
+      }
 
       uppy.use(Uppy.AwsS3Multipart, {
         limit: 5,
