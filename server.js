@@ -46,7 +46,8 @@ const {
   S3_ENDPOINT,
   S3_REGION,
   S3_ACCESS_KEY_ID,
-  S3_SECRET_ACCESS_KEY
+  S3_SECRET_ACCESS_KEY,
+  WEBHOOK_UPLOAD_TRIGGER
 } = process.env;
 
 const S3_BUCKET = requiredEnv.S3_BUCKET;
@@ -54,6 +55,10 @@ const ADMIN_PASSWORD = requiredEnv.ADMIN_PASSWORD;
 const FORCE_PATH_STYLE = process.env.FORCE_PATH_STYLE;
 const PORT = process.env.PORT || 3000;
 const TRUST_PROXY = process.env.TRUST_PROXY;
+const UPLOAD_WEBHOOK_URL =
+  typeof WEBHOOK_UPLOAD_TRIGGER === 'string' && WEBHOOK_UPLOAD_TRIGGER.trim().length > 0
+    ? WEBHOOK_UPLOAD_TRIGGER.trim()
+    : null;
 
 const parsePositiveInteger = (value, fallback) => {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -192,6 +197,62 @@ const s3Client = new S3Client({
 });
 
 const app = express();
+
+const buildPublicObjectUrl = (location, bucket, key) => {
+  if (typeof location === 'string' && location.trim()) {
+    return location.trim();
+  }
+
+  if (!bucket || !key || !S3_ENDPOINT) {
+    return null;
+  }
+
+  try {
+    const endpointUrl = new URL(S3_ENDPOINT);
+    const encodedKey = key
+      .split('/')
+      .map((part) => encodeURIComponent(part))
+      .join('/');
+    const pathStyleUrl = `${endpointUrl.origin}/${bucket}/${encodedKey}`;
+    return pathStyleUrl;
+  } catch (error) {
+    logger.warn('Failed to construct public object URL', {
+      bucket,
+      key,
+      error: serializeError(error)
+    });
+    return null;
+  }
+};
+
+const triggerUploadWebhook = async ({ name, url }) => {
+  if (!UPLOAD_WEBHOOK_URL) {
+    return;
+  }
+
+  try {
+    const response = await fetch(UPLOAD_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, url })
+    });
+
+    if (!response.ok) {
+      logger.warn('Upload webhook responded with non-OK status', {
+        status: response.status,
+        statusText: response.statusText
+      });
+    } else {
+      logger.info('Upload webhook triggered successfully', { name, url });
+    }
+  } catch (error) {
+    logger.warn('Failed to trigger upload webhook', {
+      name,
+      url,
+      error: serializeError(error)
+    });
+  }
+};
 
 const containsTraversal = (value) => value.includes('..');
 
@@ -536,6 +597,9 @@ app.post('/api/complete-multipart', asyncHandler(async (req, res) => {
     uploadId,
     partsCount: normalizedParts.length
   });
+  const fileName = key.split('/').filter((part) => part.length > 0).pop() || key;
+  const publicUrl = buildPublicObjectUrl(response.Location, response.Bucket || S3_BUCKET, response.Key || key);
+  triggerUploadWebhook({ name: fileName, url: publicUrl });
   res.json({
     location: response.Location || null,
     bucket: response.Bucket || S3_BUCKET,
