@@ -237,6 +237,27 @@
         color: rgba(226, 232, 240, 0.9);
       }
 
+      .notification {
+        position: fixed;
+        bottom: 2rem;
+        right: 2rem;
+        max-width: 320px;
+        padding: 0.85rem 1.1rem;
+        border-radius: 12px;
+        background: rgba(15, 23, 42, 0.85);
+        border: 1px solid rgba(56, 189, 248, 0.35);
+        box-shadow: 0 20px 40px rgba(15, 23, 42, 0.45);
+        font-size: 0.95rem;
+        color: var(--fg);
+        z-index: 1000;
+        transition: opacity 0.2s ease;
+      }
+
+      .notification[hidden] {
+        opacity: 0;
+        pointer-events: none;
+      }
+
       @media (max-width: 720px) {
         main {
           padding: 1.25rem;
@@ -331,6 +352,7 @@
         <div class="progress-label" id="upload-progress-label" hidden>0%</div>
       </section>
     </main>
+    <div class="notification" id="notification" role="status" aria-live="polite" hidden></div>
     <script>
       const listingBody = document.getElementById('listing-body');
       const cardList = document.getElementById('card-list');
@@ -343,6 +365,8 @@
       const objectTable = document.getElementById('object-table');
       const selectFilesBtn = document.getElementById('select-files-btn');
       const uploadStatusEl = document.getElementById('upload-status');
+      const notificationEl = document.getElementById('notification');
+      let notificationTimeout = null;
 
       let currentPrefix = '';
       let nextToken = null;
@@ -820,6 +844,28 @@
 
       resetUploadState();
 
+      function showNotification(message, options = {}) {
+        if (!notificationEl) {
+          return;
+        }
+
+        const { timeout = 4000 } = options;
+
+        notificationEl.textContent = message;
+        notificationEl.hidden = false;
+
+        if (notificationTimeout) {
+          clearTimeout(notificationTimeout);
+        }
+
+        if (timeout > 0) {
+          notificationTimeout = setTimeout(() => {
+            notificationEl.hidden = true;
+            notificationTimeout = null;
+          }, timeout);
+        }
+      }
+
       async function handleFileSelection(file) {
         if (!file) {
           return;
@@ -862,6 +908,7 @@
           const location = result.location || result.key || key;
           updateProgress(100);
           showUploadStatus(`Upload complete: ${location}`);
+          showNotification('Video added to database');
           if (cancelUploadBtn) {
             cancelUploadBtn.disabled = true;
           }
