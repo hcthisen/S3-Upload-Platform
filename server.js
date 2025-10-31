@@ -418,8 +418,9 @@ app.post('/api/create-multipart', asyncHandler(async (req, res) => {
 
   const objectKey = key;
 
+  const isMetadataObject = metadata && typeof metadata === 'object' && !Array.isArray(metadata);
   let metadataPayload;
-  if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+  if (isMetadataObject) {
     const normalizeMetadataKey = (key) => {
       if (typeof key !== 'string') {
         return null;
@@ -442,6 +443,20 @@ app.post('/api/create-multipart', asyncHandler(async (req, res) => {
       return sanitized;
     };
 
+    const sanitizeMetadataValue = (value) => {
+      if (value === undefined || value === null) {
+        return '';
+      }
+
+      const stringValue = String(value);
+      const isAsciiSafe = /^[\x20-\x7E]*$/.test(stringValue);
+      if (!isAsciiSafe) {
+        return null;
+      }
+
+      return stringValue;
+    };
+
     metadataPayload = Object.entries(metadata).reduce((acc, [metaKey, metaValue]) => {
       const normalizedKey = normalizeMetadataKey(metaKey);
       if (!normalizedKey) {
@@ -449,7 +464,15 @@ app.post('/api/create-multipart', asyncHandler(async (req, res) => {
         return acc;
       }
 
-      acc[normalizedKey] = String(metaValue ?? '');
+      const sanitizedValue = sanitizeMetadataValue(metaValue);
+      if (sanitizedValue === null) {
+        logger.warn('Skipping metadata value containing unsupported characters', {
+          key: normalizedKey
+        });
+        return acc;
+      }
+
+      acc[normalizedKey] = sanitizedValue;
       return acc;
     }, {});
 
@@ -458,12 +481,19 @@ app.post('/api/create-multipart', asyncHandler(async (req, res) => {
     }
   }
 
-  const command = new CreateMultipartUploadCommand({
+  const multipartParams = {
     Bucket: S3_BUCKET,
     Key: objectKey,
-    ContentType: contentType,
-    Metadata: metadataPayload
-  });
+    ContentType: contentType
+  };
+
+  if (metadataPayload) {
+    multipartParams.Metadata = metadataPayload;
+  } else if (isMetadataObject && Object.keys(metadata || {}).length > 0) {
+    logger.warn('Omitting multipart metadata due to sanitization');
+  }
+
+  const command = new CreateMultipartUploadCommand(multipartParams);
 
   const response = await sendS3Command(command, { key: objectKey, contentType });
   if (!response?.UploadId) {
