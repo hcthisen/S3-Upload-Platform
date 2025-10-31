@@ -420,10 +420,36 @@ app.post('/api/create-multipart', asyncHandler(async (req, res) => {
 
   let metadataPayload;
   if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
-    metadataPayload = Object.entries(metadata).reduce((acc, [metaKey, metaValue]) => {
-      if (typeof metaKey === 'string' && metaKey.trim().length > 0) {
-        acc[metaKey] = String(metaValue ?? '');
+    const normalizeMetadataKey = (key) => {
+      if (typeof key !== 'string') {
+        return null;
       }
+
+      const trimmed = key.trim().toLowerCase();
+      if (!trimmed) {
+        return null;
+      }
+
+      const withoutPrefix = trimmed.startsWith('x-amz-meta-')
+        ? trimmed.slice('x-amz-meta-'.length)
+        : trimmed;
+
+      const sanitized = withoutPrefix.replace(/[^a-z0-9!#$&'*+.^_`|~-]/g, '-');
+      if (!sanitized) {
+        return null;
+      }
+
+      return sanitized;
+    };
+
+    metadataPayload = Object.entries(metadata).reduce((acc, [metaKey, metaValue]) => {
+      const normalizedKey = normalizeMetadataKey(metaKey);
+      if (!normalizedKey) {
+        logger.warn('Skipping invalid metadata key', { key: metaKey });
+        return acc;
+      }
+
+      acc[normalizedKey] = String(metaValue ?? '');
       return acc;
     }, {});
 
