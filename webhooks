@@ -1,0 +1,2 @@
+# Default webhook endpoints
+UPLOAD_COMPLETE=https://automation.vildmedpoter.dk/webhook/19db0a76-4d84-47b5-a279-700877c7a8ca

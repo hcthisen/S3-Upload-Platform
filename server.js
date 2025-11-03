@@ -47,6 +47,7 @@ const {
   S3_REGION,
   S3_ACCESS_KEY_ID,
   S3_SECRET_ACCESS_KEY,
+  UPLOAD_WEBHOOK_URL: uploadWebhookUrlEnv,
   WEBHOOK_UPLOAD_TRIGGER
 } = process.env;
 
@@ -55,10 +56,18 @@ const ADMIN_PASSWORD = requiredEnv.ADMIN_PASSWORD;
 const FORCE_PATH_STYLE = process.env.FORCE_PATH_STYLE;
 const PORT = process.env.PORT || 3000;
 const TRUST_PROXY = process.env.TRUST_PROXY;
-const UPLOAD_WEBHOOK_URL =
-  typeof WEBHOOK_UPLOAD_TRIGGER === 'string' && WEBHOOK_UPLOAD_TRIGGER.trim().length > 0
-    ? WEBHOOK_UPLOAD_TRIGGER.trim()
-    : null;
+const DEFAULT_UPLOAD_WEBHOOK_URL = 'https://automation.vildmedpoter.dk/webhook/19db0a76-4d84-47b5-a279-700877c7a8ca';
+
+const { uploadWebhookUrl: UPLOAD_WEBHOOK_URL, usedDefaultUploadWebhook } = (() => {
+  const candidates = [uploadWebhookUrlEnv, WEBHOOK_UPLOAD_TRIGGER];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      return { uploadWebhookUrl: candidate.trim(), usedDefaultUploadWebhook: false };
+    }
+  }
+
+  return { uploadWebhookUrl: DEFAULT_UPLOAD_WEBHOOK_URL, usedDefaultUploadWebhook: true };
+})();
 
 const parsePositiveInteger = (value, fallback) => {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -148,6 +157,12 @@ const logger = {
     writeLogLine('ERROR', message, meta);
   }
 };
+
+if (usedDefaultUploadWebhook) {
+  logger.warn('UPLOAD_WEBHOOK_URL not configured, using default webhook URL', {
+    webhookUrl: UPLOAD_WEBHOOK_URL
+  });
+}
 
 const closeLogStream = () => {
   if (logStream) {
