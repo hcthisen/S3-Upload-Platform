@@ -225,8 +225,8 @@ const buildPublicObjectUrl = (location, bucket, key) => {
   }
 };
 
-const triggerUploadWebhook = async ({ name, url }) => {
-  if (!UPLOAD_WEBHOOK_URL) {
+const triggerUploadWebhook = async ({ url }) => {
+  if (!UPLOAD_WEBHOOK_URL || !url) {
     return;
   }
 
@@ -234,7 +234,7 @@ const triggerUploadWebhook = async ({ name, url }) => {
     const response = await fetch(UPLOAD_WEBHOOK_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, url })
+      body: JSON.stringify({ url })
     });
 
     if (!response.ok) {
@@ -243,11 +243,10 @@ const triggerUploadWebhook = async ({ name, url }) => {
         statusText: response.statusText
       });
     } else {
-      logger.info('Upload webhook triggered successfully', { name, url });
+      logger.info('Upload webhook triggered successfully', { url });
     }
   } catch (error) {
     logger.warn('Failed to trigger upload webhook', {
-      name,
       url,
       error: serializeError(error)
     });
@@ -653,9 +652,8 @@ app.post('/api/complete-multipart', asyncHandler(async (req, res) => {
     uploadId,
     partsCount: normalizedParts.length
   });
-  const fileName = key.split('/').filter((part) => part.length > 0).pop() || key;
   const publicUrl = buildPublicObjectUrl(response.Location, response.Bucket || S3_BUCKET, response.Key || key);
-  triggerUploadWebhook({ name: fileName, url: publicUrl });
+  triggerUploadWebhook({ url: publicUrl });
   res.json({
     location: response.Location || null,
     bucket: response.Bucket || S3_BUCKET,
