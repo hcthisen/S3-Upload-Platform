@@ -8,6 +8,9 @@ import { tmpdir } from 'os';
 import { spawn } from 'child_process';
 import { pipeline as streamPipeline } from 'stream/promises';
 import ffmpegPath from 'ffmpeg-static';
+import ffprobeStatic from 'ffprobe-static';
+import multer from 'multer';
+import archiver from 'archiver';
 import {
   S3Client,
   ListObjectsV2Command,
@@ -261,17 +264,29 @@ const s3Client = new S3Client({
   responseChecksumValidation: RESPONSE_CHECKSUM_VALIDATION
 });
 
-const app = express();
+export const app = express();
 
 if (!ffmpegPath) {
   logger.error('FFmpeg binary not found. Ensure ffmpeg-static is installed and supported on this platform.');
   process.exit(1);
 }
 
+const ffprobePath = ffprobeStatic?.path || null;
+
+if (!ffprobePath) {
+  logger.error('FFprobe binary not found. Ensure ffprobe-static is installed and supported on this platform.');
+  process.exit(1);
+}
+
 const AUDIO_PUBLIC_SUBDIR = 'generated-audio';
 const AUDIO_OUTPUT_DIR = path.resolve('public', AUDIO_PUBLIC_SUBDIR);
-const AUDIO_RETENTION_MS = 60 * 60 * 1000;
+const AUDIO_RETENTION_MS = 30 * 60 * 1000;
 const AUDIO_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+const AUDIO_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const AUDIO_MIN_FRAGMENT_MS = 500;
+const DEFAULT_MIN_SILENCE_MS = 500;
+const DEFAULT_SILENCE_THRESHOLD_DB = -40;
+const DEFAULT_CHUNK_DURATION_SEC = 30;
 const ALLOWED_VIDEO_EXTENSIONS = new Set([
   '.3gp',
   '.avi',
@@ -288,6 +303,41 @@ const ALLOWED_VIDEO_EXTENSIONS = new Set([
   '.webm',
   '.wmv'
 ]);
+const ALLOWED_AUDIO_EXTENSIONS = new Set([
+  '.mp3',
+  '.wav',
+  '.m4a',
+  '.flac',
+  '.ogg',
+  '.oga'
+]);
+const ALLOWED_AUDIO_MIME_TYPES = new Set([
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/wave',
+  'audio/x-m4a',
+  'audio/aac',
+  'audio/mp4',
+  'audio/flac',
+  'audio/ogg',
+  'audio/opus'
+]);
+const AUDIO_MIME_EXTENSION_MAP = new Map([
+  ['audio/mpeg', '.mp3'],
+  ['audio/mp3', '.mp3'],
+  ['audio/wav', '.wav'],
+  ['audio/x-wav', '.wav'],
+  ['audio/wave', '.wav'],
+  ['audio/x-m4a', '.m4a'],
+  ['audio/aac', '.m4a'],
+  ['audio/mp4', '.m4a'],
+  ['audio/flac', '.flac'],
+  ['audio/ogg', '.ogg'],
+  ['audio/opus', '.ogg']
+]);
+const ALLOWED_OUTPUT_FORMATS = new Set(['mp3', 'wav']);
 
 try {
   fs.mkdirSync(AUDIO_OUTPUT_DIR, { recursive: true });
@@ -348,6 +398,136 @@ const cleanupTimer = setInterval(() => {
 if (typeof cleanupTimer.unref === 'function') {
   cleanupTimer.unref();
 }
+
+const resolveAudioExtension = (file) => {
+  const originalExt = typeof file.originalname === 'string'
+    ? path.extname(file.originalname).toLowerCase()
+    : '';
+
+  if (ALLOWED_AUDIO_EXTENSIONS.has(originalExt)) {
+    return originalExt;
+  }
+
+  const mapped = AUDIO_MIME_EXTENSION_MAP.get((file.mimetype || '').toLowerCase());
+  if (mapped) {
+    return mapped;
+  }
+
+  return '.tmp';
+};
+
+const audioUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      cb(null, tmpdir());
+    },
+    filename: (req, file, cb) => {
+      const extension = resolveAudioExtension(file);
+      cb(null, `audio-upload-${Date.now()}-${crypto.randomUUID()}${extension}`);
+    }
+  }),
+  limits: {
+    fileSize: AUDIO_MAX_UPLOAD_BYTES
+  },
+  fileFilter: (req, file, cb) => {
+    const extension = typeof file.originalname === 'string'
+      ? path.extname(file.originalname).toLowerCase()
+      : '';
+    const mimetype = (file.mimetype || '').toLowerCase();
+
+    if (ALLOWED_AUDIO_EXTENSIONS.has(extension) || ALLOWED_AUDIO_MIME_TYPES.has(mimetype)) {
+      cb(null, true);
+      return;
+    }
+
+    const error = new Error('Unsupported audio format');
+    error.code = 'UNSUPPORTED_AUDIO_FORMAT';
+    error.statusCode = 415;
+    cb(error);
+  }
+});
+
+const audioUploadMiddleware = (req, res, next) => {
+  audioUpload.single('audio')(req, res, (error) => {
+    if (!error) {
+      next();
+      return;
+    }
+
+    if (error instanceof multer.MulterError) {
+      if (error.code === 'LIMIT_FILE_SIZE') {
+        res.status(413).json({ error: 'Audio file exceeds the 25 MB limit' });
+        return;
+      }
+
+      logger.warn('Multer reported an error while processing audio upload', {
+        error: serializeError(error)
+      });
+      res.status(400).json({ error: 'Failed to process uploaded audio' });
+      return;
+    }
+
+    if (error?.code === 'UNSUPPORTED_AUDIO_FORMAT') {
+      res.status(error.statusCode || 415).json({ error: 'Unsupported audio format' });
+      return;
+    }
+
+    logger.warn('Unknown error encountered while handling audio upload', {
+      error: serializeError(error)
+    });
+    res.status(400).json({ error: 'Failed to process uploaded audio' });
+  });
+};
+
+const safeUnlink = async (filePath) => {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    await fs.promises.unlink(filePath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      logger.warn('Failed to remove temporary file', {
+        file: filePath,
+        error: serializeError(error)
+      });
+    }
+  }
+};
+
+const runProcess = (binary, args) => new Promise((resolve, reject) => {
+  const processArgs = Array.isArray(args) ? args : [];
+  const child = spawn(binary, processArgs);
+  const stdoutChunks = [];
+  const stderrChunks = [];
+
+  child.stdout?.on('data', (data) => {
+    stdoutChunks.push(Buffer.from(data));
+  });
+
+  child.stderr?.on('data', (data) => {
+    stderrChunks.push(Buffer.from(data));
+  });
+
+  child.on('error', (error) => {
+    reject(error);
+  });
+
+  child.on('close', (code) => {
+    if (code === 0) {
+      resolve({
+        stdout: stdoutChunks.length > 0 ? Buffer.concat(stdoutChunks) : Buffer.alloc(0),
+        stderr: stderrChunks.length > 0 ? Buffer.concat(stderrChunks) : Buffer.alloc(0)
+      });
+    } else {
+      const stderrOutput = stderrChunks.length > 0 ? Buffer.concat(stderrChunks).toString() : '';
+      const error = new Error(`Process exited with code ${code}${stderrOutput ? `: ${stderrOutput}` : ''}`);
+      error.code = code;
+      reject(error);
+    }
+  });
+});
 
 const buildPublicObjectUrl = (location, bucket, key) => {
   if (typeof location === 'string' && location.trim()) {
@@ -573,6 +753,221 @@ const convertVideoToMp3 = (inputPath, outputPath) => new Promise((resolve, rejec
   });
 });
 
+const probeAudioDurationMs = async (inputPath) => {
+  const args = [
+    '-v', 'error',
+    '-show_entries', 'format=duration',
+    '-of', 'default=noprint_wrappers=1:nokey=1',
+    inputPath
+  ];
+
+  const { stdout } = await runProcess(ffprobePath, args);
+  const durationSeconds = Number.parseFloat(stdout.toString().trim());
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    throw new Error('Unable to determine audio duration');
+  }
+
+  return Math.floor(durationSeconds * 1000);
+};
+
+const detectSilenceIntervals = async (inputPath, { minSilenceMs, silenceThresholdDb }) => {
+  const minSilenceSeconds = Math.max(minSilenceMs, 0) / 1000;
+  const filter = `silencedetect=noise=${silenceThresholdDb}dB:d=${minSilenceSeconds.toFixed(3)}`;
+  const args = [
+    '-hide_banner',
+    '-i', inputPath,
+    '-af', filter,
+    '-f', 'null',
+    '-'
+  ];
+
+  const { stderr } = await runProcess(ffmpegPath, args);
+  const lines = stderr.toString().split(/\r?\n/);
+  const intervals = [];
+  let pending = null;
+
+  const silenceStartRegex = /silence_start:\s*([0-9.]+)/i;
+  const silenceEndRegex = /silence_end:\s*([0-9.]+)/i;
+
+  for (const line of lines) {
+    const startMatch = line.match(silenceStartRegex);
+    if (startMatch) {
+      const value = Number.parseFloat(startMatch[1]);
+      if (Number.isFinite(value)) {
+        pending = { start: value };
+      }
+      continue;
+    }
+
+    const endMatch = line.match(silenceEndRegex);
+    if (endMatch) {
+      const value = Number.parseFloat(endMatch[1]);
+      if (Number.isFinite(value)) {
+        if (pending) {
+          intervals.push({ start: pending.start, end: value });
+          pending = null;
+        } else {
+          intervals.push({ start: value, end: value });
+        }
+      }
+    }
+  }
+
+  if (pending) {
+    intervals.push({ start: pending.start, end: null });
+  }
+
+  return intervals;
+};
+
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+const mergeShortSegments = (segments, minDurationMs) => {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return [];
+  }
+
+  const merged = [];
+  for (let i = 0; i < segments.length; i += 1) {
+    const current = { ...segments[i] };
+    current.durationMs = Math.max(0, Math.floor(current.endMs - current.startMs));
+
+    if (current.durationMs >= minDurationMs || segments.length === 1) {
+      merged.push(current);
+      continue;
+    }
+
+    if (merged.length > 0) {
+      const previous = merged[merged.length - 1];
+      previous.endMs = Math.max(previous.endMs, current.endMs);
+      previous.durationMs = Math.max(0, Math.floor(previous.endMs - previous.startMs));
+      continue;
+    }
+
+    if (i + 1 < segments.length) {
+      const next = { ...segments[i + 1] };
+      const newSegment = {
+        startMs: Math.min(current.startMs, next.startMs),
+        endMs: next.endMs
+      };
+      newSegment.durationMs = Math.max(0, Math.floor(newSegment.endMs - newSegment.startMs));
+      segments[i + 1] = newSegment;
+      continue;
+    }
+
+    merged.push(current);
+  }
+
+  return merged.map((segment) => ({
+    startMs: segment.startMs,
+    endMs: segment.endMs,
+    durationMs: Math.max(0, Math.floor(segment.endMs - segment.startMs))
+  }));
+};
+
+const buildSegmentsFromSilence = (durationMs, silenceIntervals) => {
+  const sortedIntervals = [...silenceIntervals].map((interval) => ({
+    startMs: Math.floor(clamp(interval.start * 1000, 0, durationMs)),
+    endMs: interval.end == null
+      ? durationMs
+      : Math.floor(clamp(interval.end * 1000, 0, durationMs))
+  })).sort((a, b) => a.startMs - b.startMs);
+
+  const segments = [];
+  let cursor = 0;
+
+  for (const interval of sortedIntervals) {
+    if (interval.startMs > cursor) {
+      segments.push({
+        startMs: cursor,
+        endMs: Math.min(interval.startMs, durationMs)
+      });
+    }
+
+    cursor = Math.max(cursor, interval.endMs);
+  }
+
+  if (cursor < durationMs) {
+    segments.push({ startMs: cursor, endMs: durationMs });
+  }
+
+  return segments
+    .map((segment) => ({
+      startMs: segment.startMs,
+      endMs: segment.endMs,
+      durationMs: Math.max(0, Math.floor(segment.endMs - segment.startMs))
+    }))
+    .filter((segment) => segment.durationMs > 0);
+};
+
+const buildFixedSegments = (durationMs, chunkDurationSec) => {
+  const chunkDurationMs = Math.max(1, chunkDurationSec) * 1000;
+  const segments = [];
+  let cursor = 0;
+
+  while (cursor < durationMs) {
+    const end = Math.min(cursor + chunkDurationMs, durationMs);
+    segments.push({
+      startMs: cursor,
+      endMs: end,
+      durationMs: Math.max(0, Math.floor(end - cursor))
+    });
+    cursor = end;
+  }
+
+  return segments.filter((segment) => segment.durationMs > 0);
+};
+
+const formatTimeSeconds = (milliseconds) => (milliseconds / 1000).toFixed(3);
+
+const transcodeSegment = async ({
+  inputPath,
+  outputPath,
+  startMs,
+  durationMs,
+  codec,
+  sampleRate,
+  channels
+}) => {
+  const args = [
+    '-y',
+    '-hide_banner',
+    '-ss', formatTimeSeconds(startMs),
+    '-i', inputPath
+  ];
+
+  if (Number.isFinite(durationMs) && durationMs > 0) {
+    args.push('-t', formatTimeSeconds(durationMs));
+  }
+
+  if (codec === 'copy') {
+    args.push('-c', 'copy');
+  } else if (codec === 'mp3') {
+    args.push('-acodec', 'libmp3lame', '-q:a', '2');
+    if (Number.isFinite(sampleRate) && sampleRate > 0) {
+      args.push('-ar', String(Math.floor(sampleRate)));
+    }
+    if (Number.isFinite(channels) && channels > 0) {
+      args.push('-ac', String(Math.floor(channels)));
+    }
+  } else if (codec === 'wav') {
+    args.push('-acodec', 'pcm_s16le');
+    if (Number.isFinite(sampleRate) && sampleRate > 0) {
+      args.push('-ar', String(Math.floor(sampleRate)));
+    }
+    if (Number.isFinite(channels) && channels > 0) {
+      args.push('-ac', String(Math.floor(channels)));
+    }
+  } else {
+    args.push('-c', 'copy');
+  }
+
+  args.push('-map_metadata', '-1');
+  args.push(outputPath);
+
+  await runProcess(ffmpegPath, args);
+};
+
 const buildAudioUrl = (req, fileName) => {
   const host = req.get('host');
   if (!host) {
@@ -582,6 +977,230 @@ const buildAudioUrl = (req, fileName) => {
   const sanitized = encodeURIComponent(fileName);
   return `${req.protocol}://${host}/${AUDIO_PUBLIC_SUBDIR}/${sanitized}`;
 };
+
+const parseInteger = (value, fallback, { min, max } = {}) => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return normalizeInteger(value, fallback, { min, max });
+  }
+
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return normalizeInteger(parsed, fallback, { min, max });
+    }
+  }
+
+  return fallback;
+};
+
+const normalizeInteger = (value, fallback, { min, max } = {}) => {
+  const integer = Math.floor(value);
+  if (Number.isFinite(integer)) {
+    if (typeof min === 'number' && integer < min) {
+      return fallback;
+    }
+    if (typeof max === 'number' && integer > max) {
+      return fallback;
+    }
+    return integer;
+  }
+  return fallback;
+};
+
+const parseBoolean = (value, fallback = false) => {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+};
+
+app.post('/splitaudio', audioUploadMiddleware, asyncHandler(async (req, res) => {
+  const uploadedFile = req.file;
+
+  if (!uploadedFile) {
+    return res.status(400).json({ error: 'audio field is required' });
+  }
+
+  const body = req.body || {};
+  const rawMode = typeof body.mode === 'string' ? body.mode.trim().toLowerCase() : '';
+  const mode = rawMode === 'fixed' ? 'fixed' : 'silence';
+  const minSilenceMs = parseInteger(body.min_silence_ms, DEFAULT_MIN_SILENCE_MS, { min: 1 });
+  const silenceThresholdDb = parseInteger(body.silence_thresh_db, DEFAULT_SILENCE_THRESHOLD_DB, {});
+  const chunkDurationSec = parseInteger(body.chunk_duration_sec, DEFAULT_CHUNK_DURATION_SEC, { min: 1 });
+  const maxSegments = parseInteger(body.max_segments, null, { min: 1 });
+  const sampleRate = parseInteger(body.sample_rate, null, { min: 1 });
+  const channels = parseInteger(body.channels, null, { min: 1, max: 2 });
+  const archiveRequested = parseBoolean(body.archive, false);
+
+  const originalExt = path.extname(uploadedFile.originalname || '').toLowerCase().replace('.', '');
+  const requestedFormatRaw = typeof body.output_format === 'string' ? body.output_format.trim().toLowerCase() : '';
+  const requestedFormat = ALLOWED_OUTPUT_FORMATS.has(requestedFormatRaw) ? requestedFormatRaw : '';
+  const normalizedSourceFormat = ALLOWED_OUTPUT_FORMATS.has(originalExt) ? originalExt : null;
+  const targetFormat = requestedFormat || normalizedSourceFormat || 'wav';
+  const needsTranscode = Boolean(sampleRate) || Boolean(channels) || !normalizedSourceFormat || targetFormat !== normalizedSourceFormat;
+  const codec = needsTranscode ? targetFormat : 'copy';
+
+  const createdFiles = [];
+  const segmentMetadata = [];
+
+  try {
+    let durationMs;
+    try {
+      durationMs = await probeAudioDurationMs(uploadedFile.path);
+    } catch (error) {
+      logger.warn('Failed to determine audio duration for split request', {
+        error: serializeError(error)
+      });
+      return res.status(422).json({ error: 'Unable to process the uploaded audio file' });
+    }
+
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      return res.status(422).json({ error: 'Unable to process the uploaded audio file' });
+    }
+
+    let segments;
+    try {
+      if (mode === 'fixed') {
+        segments = buildFixedSegments(durationMs, chunkDurationSec);
+      } else {
+        const silenceIntervals = await detectSilenceIntervals(uploadedFile.path, {
+          minSilenceMs,
+          silenceThresholdDb
+        });
+        segments = buildSegmentsFromSilence(durationMs, silenceIntervals);
+        segments = mergeShortSegments(segments, AUDIO_MIN_FRAGMENT_MS);
+        if (segments.length === 0) {
+          segments = [{ startMs: 0, endMs: durationMs, durationMs }];
+        }
+      }
+    } catch (error) {
+      logger.warn('Failed to analyze audio for splitting', {
+        error: serializeError(error)
+      });
+      return res.status(422).json({ error: 'Unable to analyze audio for splitting' });
+    }
+
+    if (maxSegments && Number.isInteger(maxSegments)) {
+      segments = segments.slice(0, maxSegments);
+    }
+
+    segments = segments.filter((segment) => segment.durationMs > 0);
+
+    if (segments.length === 0) {
+      return res.status(422).json({ error: 'No audio segments could be produced with the provided options' });
+    }
+
+    const unlinkCreatedFiles = async () => {
+      await Promise.all(createdFiles.map((filePath) => safeUnlink(filePath)));
+    };
+
+    try {
+      for (let index = 0; index < segments.length; index += 1) {
+        const segment = segments[index];
+        const filename = `segment_${String(index + 1).padStart(3, '0')}.${targetFormat}`;
+        const outputPath = path.join(AUDIO_OUTPUT_DIR, filename);
+
+        await transcodeSegment({
+          inputPath: uploadedFile.path,
+          outputPath,
+          startMs: segment.startMs,
+          durationMs: segment.durationMs,
+          codec,
+          sampleRate,
+          channels
+        });
+
+        createdFiles.push(outputPath);
+
+        const stats = await fs.promises.stat(outputPath);
+        const publicUrl = buildAudioUrl(req, filename);
+
+        if (!publicUrl) {
+          throw new Error('Failed to build public URL for audio segment');
+        }
+
+        segmentMetadata.push({
+          filePath: outputPath,
+          filename,
+          startMs: segment.startMs,
+          endMs: segment.endMs,
+          durationMs: segment.durationMs,
+          sizeBytes: stats.size,
+          url: publicUrl
+        });
+      }
+    } catch (error) {
+      logger.warn('Failed to generate audio segments', {
+        error: serializeError(error)
+      });
+      await unlinkCreatedFiles();
+      return res.status(422).json({ error: 'Failed to generate audio segments' });
+    }
+
+    cleanupExpiredAudioFiles().catch((error) => {
+      logger.warn('On-demand audio cleanup failed after splitting audio', {
+        error: serializeError(error)
+      });
+    });
+
+    const responseSegments = segmentMetadata.map((segment) => ({
+      filename: segment.filename,
+      url: segment.url,
+      start_ms: segment.startMs,
+      end_ms: segment.endMs,
+      duration_ms: segment.durationMs,
+      size_bytes: segment.sizeBytes
+    }));
+
+    if (archiveRequested) {
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename="segments-${Date.now()}.zip"`);
+
+      const archive = archiver('zip', { zlib: { level: 9 } });
+
+      archive.pipe(res);
+      for (const segment of segmentMetadata) {
+        archive.file(segment.filePath, { name: segment.filename });
+      }
+
+      const archivePromise = new Promise((resolve, reject) => {
+        res.on('finish', resolve);
+        res.on('close', resolve);
+        res.on('error', reject);
+        archive.on('error', reject);
+        const finalizeResult = archive.finalize();
+        if (finalizeResult && typeof finalizeResult.then === 'function') {
+          finalizeResult.catch((error) => {
+            logger.warn('Failed while finalizing audio archive', {
+              error: serializeError(error)
+            });
+            reject(error);
+          });
+        }
+      });
+
+      await archivePromise;
+    } else {
+      res.json({
+        segments: responseSegments,
+        count: responseSegments.length,
+        mode
+      });
+    }
+  } finally {
+    await safeUnlink(uploadedFile.path);
+  }
+}));
 
 app.post('/api/getaudio', asyncHandler(async (req, res) => {
   const { video_url: videoUrlRaw } = req.body || {};
@@ -1122,6 +1741,10 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: 'Internal server error' });
 });
 
-app.listen(Number(PORT), () => {
-  logger.info('Server running', { port: Number(PORT) });
-});
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(Number(PORT), () => {
+    logger.info('Server running', { port: Number(PORT) });
+  });
+}
+
+export default app;
