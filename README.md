@@ -32,6 +32,7 @@ S3_SECRET_ACCESS_KEY=your-secret-key
 ADMIN_PASSWORD=change-me
 PORT=3000
 FORCE_PATH_STYLE=true
+S3_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED
 TRUST_PROXY=true
 # Optional multipart tuning
 UPLOAD_PART_SIZE_BYTES=8388608
@@ -47,6 +48,7 @@ UPLOAD_MAX_CONCURRENCY=4
 - `ADMIN_PASSWORD`: Password for the `admin` user used by HTTP basic authentication.
 - `PORT` (optional): Port that the Express server listens on (defaults to 3000).
 - `FORCE_PATH_STYLE` (optional): Set to `true` to enable path-style requests (recommended for Hetzner).
+- `S3_REQUEST_CHECKSUM_CALCULATION` (optional): Controls when the SDK adds checksum headers to requests. Accepts `WHEN_REQUIRED` or `WHEN_SUPPORTED` and defaults to `WHEN_REQUIRED`, which matches Hetzner's compatibility guidance.
 - `TRUST_PROXY` (optional): Overrides Express's [`trust proxy`](https://expressjs.com/en/guide/behind-proxies.html) setting. Defaults to `true` so deployments behind load balancers or reverse proxies correctly honour `X-Forwarded-*` headers. Set to `false` to disable or provide a numeric/string value to match your topology.
 - `LOG_FILE` (optional): Absolute or relative path to a writable file. When set, the server continues logging to stdout/stderr and also appends timestamped entries to the specified file, making it easier to inspect request and S3 activity after the fact.
 - `UPLOAD_PART_SIZE_BYTES` (optional): Overrides the multipart part size used by the client (defaults to 8 MiB, but the server will never allow values below S3's 5 MiB minimum).

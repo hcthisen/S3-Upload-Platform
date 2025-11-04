@@ -85,12 +85,32 @@ const parsePositiveInteger = (value, fallback) => {
 const MIN_PART_SIZE = 5 * 1024 * 1024;
 const DEFAULT_PART_SIZE = 8 * 1024 * 1024;
 const DEFAULT_CONCURRENCY = 4;
+const DEFAULT_REQUEST_CHECKSUM_CALCULATION = 'WHEN_REQUIRED';
+
+const resolveRequestChecksumCalculation = (value) => {
+  if (typeof value !== 'string') {
+    return { value: DEFAULT_REQUEST_CHECKSUM_CALCULATION, invalidValue: null };
+  }
+
+  const normalized = value.trim().toUpperCase();
+  const allowedValues = new Set(['WHEN_SUPPORTED', 'WHEN_REQUIRED']);
+  if (allowedValues.has(normalized)) {
+    return { value: normalized, invalidValue: null };
+  }
+
+  return { value: DEFAULT_REQUEST_CHECKSUM_CALCULATION, invalidValue: value };
+};
 
 const configuredPartSize = parsePositiveInteger(process.env.UPLOAD_PART_SIZE_BYTES, DEFAULT_PART_SIZE);
 const uploadConfig = {
   partSizeBytes: Math.max(configuredPartSize, MIN_PART_SIZE),
   maxConcurrency: parsePositiveInteger(process.env.UPLOAD_MAX_CONCURRENCY, DEFAULT_CONCURRENCY)
 };
+
+const {
+  value: REQUEST_CHECKSUM_CALCULATION,
+  invalidValue: invalidRequestChecksumCalculation
+} = resolveRequestChecksumCalculation(process.env.S3_REQUEST_CHECKSUM_CALCULATION);
 
 const serializeError = (error) => ({
   name: error?.name,
@@ -158,6 +178,13 @@ const logger = {
   }
 };
 
+if (invalidRequestChecksumCalculation) {
+  logger.warn('Invalid S3_REQUEST_CHECKSUM_CALCULATION value provided, falling back to default', {
+    providedValue: invalidRequestChecksumCalculation,
+    appliedValue: REQUEST_CHECKSUM_CALCULATION
+  });
+}
+
 if (usedDefaultUploadWebhook) {
   logger.warn('UPLOAD_WEBHOOK_URL not configured, using default webhook URL', {
     webhookUrl: UPLOAD_WEBHOOK_URL
@@ -208,7 +235,9 @@ const s3Client = new S3Client({
     secretAccessKey: S3_SECRET_ACCESS_KEY
   },
   forcePathStyle: FORCE_PATH_STYLE ? FORCE_PATH_STYLE.toLowerCase() === 'true' : true,
-  signingEscapePath: true
+  signingEscapePath: true,
+  requestChecksumCalculation: REQUEST_CHECKSUM_CALCULATION,
+  responseChecksumValidation: 'WHEN_REQUIRED'
 });
 
 const app = express();
@@ -327,7 +356,8 @@ logger.info('Server configuration', {
   trustProxy: app.get('trust proxy'),
   logFile: LOG_FILE || null,
   uploadPartSizeBytes: uploadConfig.partSizeBytes,
-  uploadMaxConcurrency: uploadConfig.maxConcurrency
+  uploadMaxConcurrency: uploadConfig.maxConcurrency,
+  requestChecksumCalculation: REQUEST_CHECKSUM_CALCULATION
 });
 app.use(helmet({
   contentSecurityPolicy: false
