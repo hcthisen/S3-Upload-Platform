@@ -4,16 +4,22 @@
   "description": "Password-protected web UI for managing Hetzner S3 buckets with multipart uploads.",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check:s3-multipart": "tsx scripts/check-s3-multipart.ts"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.497.0",
-    "@aws-sdk/s3-request-presigner": "^3.497.0",
+    "@aws-sdk/client-s3": "3.726.1",
+    "@aws-sdk/lib-storage": "3.726.1",
+    "@aws-sdk/s3-request-presigner": "3.726.1",
     "express": "^4.19.2",
     "express-basic-auth": "^1.2.1",
-    "helmet": "^7.1.0"
+    "helmet": "^7.1.0",
+    "semver": "7.6.3"
+  },
+  "devDependencies": {
+    "tsx": "4.7.0"
   }
 }
