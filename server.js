@@ -240,16 +240,64 @@ const buildPublicObjectUrl = (location, bucket, key) => {
   }
 };
 
-const triggerUploadWebhook = async ({ url }) => {
+const extractFileName = ({ key, url }) => {
+  const sources = [];
+
+  if (typeof key === 'string' && key.trim()) {
+    sources.push(key.trim());
+  }
+
+  if (typeof url === 'string' && url.trim()) {
+    try {
+      const parsedUrl = new URL(url.trim());
+      sources.push(parsedUrl.pathname);
+    } catch (error) {
+      logger.warn('Failed to parse upload URL while extracting file name', {
+        url,
+        error: serializeError(error)
+      });
+      sources.push(url.trim());
+    }
+  }
+
+  for (const source of sources) {
+    const parts = source.split('/').filter(Boolean);
+    const lastSegment = parts[parts.length - 1];
+
+    if (!lastSegment) {
+      continue;
+    }
+
+    let segment = lastSegment;
+    try {
+      segment = decodeURIComponent(lastSegment);
+    } catch (error) {
+      logger.warn('Failed to decode file name segment while extracting file name', {
+        segment: lastSegment,
+        error: serializeError(error)
+      });
+    }
+
+    const parsedPath = path.posix.parse(segment);
+    if (parsedPath.name) {
+      return parsedPath.name;
+    }
+  }
+
+  return null;
+};
+
+const triggerUploadWebhook = async ({ url, key }) => {
   if (!UPLOAD_WEBHOOK_URL || !url) {
     return;
   }
 
   try {
+    const fileName = extractFileName({ key, url });
     const response = await fetch(UPLOAD_WEBHOOK_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url })
+      body: JSON.stringify({ url, fileName })
     });
 
     if (!response.ok) {
@@ -258,7 +306,7 @@ const triggerUploadWebhook = async ({ url }) => {
         statusText: response.statusText
       });
     } else {
-      logger.info('Upload webhook triggered successfully', { url });
+      logger.info('Upload webhook triggered successfully', { url, fileName });
     }
   } catch (error) {
     logger.warn('Failed to trigger upload webhook', {
@@ -668,7 +716,7 @@ app.post('/api/complete-multipart', asyncHandler(async (req, res) => {
     partsCount: normalizedParts.length
   });
   const publicUrl = buildPublicObjectUrl(response.Location, response.Bucket || S3_BUCKET, response.Key || key);
-  triggerUploadWebhook({ url: publicUrl });
+  triggerUploadWebhook({ url: publicUrl, key });
   res.json({
     location: response.Location || null,
     bucket: response.Bucket || S3_BUCKET,
