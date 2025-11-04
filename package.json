@@ -16,6 +16,7 @@
     "@aws-sdk/s3-request-presigner": "3.726.1",
     "express": "^4.19.2",
     "express-basic-auth": "^1.2.1",
+    "ffmpeg-static": "^5.2.0",
     "helmet": "^7.1.0",
     "semver": "7.6.3"
   },

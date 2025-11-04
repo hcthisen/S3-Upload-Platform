@@ -3,6 +3,11 @@ import helmet from 'helmet';
 import basicAuth from 'express-basic-auth';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import { tmpdir } from 'os';
+import { spawn } from 'child_process';
+import { pipeline as streamPipeline } from 'stream/promises';
+import ffmpegPath from 'ffmpeg-static';
 import {
   S3Client,
   ListObjectsV2Command,
@@ -258,6 +263,92 @@ const s3Client = new S3Client({
 
 const app = express();
 
+if (!ffmpegPath) {
+  logger.error('FFmpeg binary not found. Ensure ffmpeg-static is installed and supported on this platform.');
+  process.exit(1);
+}
+
+const AUDIO_PUBLIC_SUBDIR = 'generated-audio';
+const AUDIO_OUTPUT_DIR = path.resolve('public', AUDIO_PUBLIC_SUBDIR);
+const AUDIO_RETENTION_MS = 60 * 60 * 1000;
+const AUDIO_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+const ALLOWED_VIDEO_EXTENSIONS = new Set([
+  '.3gp',
+  '.avi',
+  '.flv',
+  '.m2ts',
+  '.m4v',
+  '.mkv',
+  '.mov',
+  '.mp4',
+  '.mpeg',
+  '.mpg',
+  '.mts',
+  '.ogv',
+  '.webm',
+  '.wmv'
+]);
+
+try {
+  fs.mkdirSync(AUDIO_OUTPUT_DIR, { recursive: true });
+} catch (error) {
+  logger.error('Failed to ensure audio output directory exists', {
+    directory: AUDIO_OUTPUT_DIR,
+    error: serializeError(error)
+  });
+  process.exit(1);
+}
+
+const cleanupExpiredAudioFiles = async () => {
+  try {
+    const entries = await fs.promises.readdir(AUDIO_OUTPUT_DIR, { withFileTypes: true });
+    const now = Date.now();
+
+    await Promise.all(entries.map(async (entry) => {
+      if (!entry.isFile()) {
+        return;
+      }
+
+      const filePath = path.join(AUDIO_OUTPUT_DIR, entry.name);
+      try {
+        const stats = await fs.promises.stat(filePath);
+        if (now - stats.mtimeMs > AUDIO_RETENTION_MS) {
+          await fs.promises.unlink(filePath);
+          logger.info('Deleted expired audio file', { file: filePath });
+        }
+      } catch (innerError) {
+        logger.warn('Failed to inspect or delete audio file during cleanup', {
+          file: filePath,
+          error: serializeError(innerError)
+        });
+      }
+    }));
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return;
+    }
+
+    logger.warn('Failed to scan audio output directory during cleanup', {
+      directory: AUDIO_OUTPUT_DIR,
+      error: serializeError(error)
+    });
+  }
+};
+
+cleanupExpiredAudioFiles().catch((error) => {
+  logger.warn('Initial audio cleanup run failed', { error: serializeError(error) });
+});
+
+const cleanupTimer = setInterval(() => {
+  cleanupExpiredAudioFiles().catch((error) => {
+    logger.warn('Scheduled audio cleanup failed', { error: serializeError(error) });
+  });
+}, AUDIO_CLEANUP_INTERVAL_MS);
+
+if (typeof cleanupTimer.unref === 'function') {
+  cleanupTimer.unref();
+}
+
 const buildPublicObjectUrl = (location, bucket, key) => {
   if (typeof location === 'string' && location.trim()) {
     return location.trim();
@@ -449,6 +540,181 @@ app.get('/api/upload-config', (req, res) => {
 const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
+
+const convertVideoToMp3 = (inputPath, outputPath) => new Promise((resolve, reject) => {
+  const ffmpegArguments = [
+    '-y',
+    '-i', inputPath,
+    '-vn',
+    '-acodec', 'libmp3lame',
+    '-q:a', '2',
+    outputPath
+  ];
+
+  const ffmpegProcess = spawn(ffmpegPath, ffmpegArguments);
+  const stderrChunks = [];
+
+  ffmpegProcess.stderr?.on('data', (data) => {
+    stderrChunks.push(Buffer.from(data));
+  });
+
+  ffmpegProcess.on('error', (error) => {
+    reject(error);
+  });
+
+  ffmpegProcess.on('close', (code) => {
+    if (code === 0) {
+      resolve();
+    } else {
+      const stderrOutput = stderrChunks.length > 0 ? Buffer.concat(stderrChunks).toString() : '';
+      const error = new Error(`FFmpeg exited with code ${code}${stderrOutput ? `: ${stderrOutput}` : ''}`);
+      reject(error);
+    }
+  });
+});
+
+const buildAudioUrl = (req, fileName) => {
+  const host = req.get('host');
+  if (!host) {
+    return null;
+  }
+
+  const sanitized = encodeURIComponent(fileName);
+  return `${req.protocol}://${host}/${AUDIO_PUBLIC_SUBDIR}/${sanitized}`;
+};
+
+app.post('/api/getaudio', asyncHandler(async (req, res) => {
+  const { video_url: videoUrlRaw } = req.body || {};
+
+  if (typeof videoUrlRaw !== 'string' || videoUrlRaw.trim().length === 0) {
+    return res.status(400).json({ error: 'video_url is required' });
+  }
+
+  let videoUrl;
+  try {
+    videoUrl = new URL(videoUrlRaw.trim());
+  } catch (error) {
+    return res.status(400).json({ error: 'video_url must be a valid URL' });
+  }
+
+  if (!['http:', 'https:'].includes(videoUrl.protocol)) {
+    return res.status(400).json({ error: 'video_url must use HTTP or HTTPS' });
+  }
+
+  const extension = path.extname(videoUrl.pathname).toLowerCase();
+  const extensionIndicatesVideo = extension && ALLOWED_VIDEO_EXTENSIONS.has(extension);
+
+  let response;
+  try {
+    response = await fetch(videoUrl.toString());
+  } catch (error) {
+    logger.warn('Failed to download video for audio extraction', {
+      videoUrl: videoUrl.toString(),
+      error: serializeError(error)
+    });
+    return res.status(502).json({ error: 'Unable to download video from the provided URL' });
+  }
+
+  if (!response.ok) {
+    logger.warn('Non-success status received when downloading video', {
+      videoUrl: videoUrl.toString(),
+      status: response.status,
+      statusText: response.statusText
+    });
+    return res.status(502).json({ error: 'Unable to download video from the provided URL' });
+  }
+
+  if (!response.body) {
+    logger.warn('Video response did not include a body', { videoUrl: videoUrl.toString() });
+    return res.status(502).json({ error: 'Invalid response when downloading video' });
+  }
+
+  const contentType = response.headers.get('content-type');
+  const contentTypeIsVideo = typeof contentType === 'string' && contentType.toLowerCase().startsWith('video/');
+
+  if (!contentTypeIsVideo && !extensionIndicatesVideo) {
+    return res.status(400).json({ error: 'Provided URL does not reference a supported video file' });
+  }
+
+  const tempVideoPath = path.join(
+    tmpdir(),
+    `video-${Date.now()}-${crypto.randomUUID()}${extensionIndicatesVideo ? extension : '.tmp'}`
+  );
+
+  try {
+    await streamPipeline(response.body, fs.createWriteStream(tempVideoPath));
+  } catch (error) {
+    logger.warn('Failed while downloading video stream', {
+      videoUrl: videoUrl.toString(),
+      error: serializeError(error)
+    });
+    try {
+      await fs.promises.unlink(tempVideoPath);
+    } catch (cleanupError) {
+      if (cleanupError?.code !== 'ENOENT') {
+        logger.warn('Failed to remove incomplete temporary video file', {
+          file: tempVideoPath,
+          error: serializeError(cleanupError)
+        });
+      }
+    }
+    return res.status(502).json({ error: 'Failed to download video content' });
+  }
+
+  const audioFileName = `audio-${Date.now()}-${crypto.randomUUID()}.mp3`;
+  const audioFilePath = path.join(AUDIO_OUTPUT_DIR, audioFileName);
+
+  try {
+    await convertVideoToMp3(tempVideoPath, audioFilePath);
+  } catch (error) {
+    logger.warn('Failed to convert video to audio', {
+      videoUrl: videoUrl.toString(),
+      error: serializeError(error)
+    });
+    try {
+      await fs.promises.unlink(audioFilePath);
+    } catch (cleanupError) {
+      if (cleanupError?.code !== 'ENOENT') {
+        logger.warn('Failed to remove incomplete audio file', {
+          file: audioFilePath,
+          error: serializeError(cleanupError)
+        });
+      }
+    }
+    return res.status(500).json({ error: 'Failed to extract audio from the provided video' });
+  } finally {
+    try {
+      await fs.promises.unlink(tempVideoPath);
+    } catch (cleanupError) {
+      if (cleanupError?.code !== 'ENOENT') {
+        logger.warn('Failed to remove temporary video file', {
+          file: tempVideoPath,
+          error: serializeError(cleanupError)
+        });
+      }
+    }
+  }
+
+  cleanupExpiredAudioFiles().catch((error) => {
+    logger.warn('On-demand audio cleanup failed after generating file', {
+      error: serializeError(error)
+    });
+  });
+
+  const audioUrl = buildAudioUrl(req, audioFileName);
+  if (!audioUrl) {
+    logger.warn('Unable to construct public URL for audio file', { fileName: audioFileName });
+    return res.status(500).json({ error: 'Failed to generate audio URL' });
+  }
+
+  logger.info('Audio extracted from video successfully', {
+    audioFile: audioFileName,
+    videoUrl: videoUrl.toString(),
+    contentType: contentType || null
+  });
+
+  res.json({ audio_url: audioUrl });
+}));
 
 app.use((req, res, next) => {
   const startTime = Date.now();
