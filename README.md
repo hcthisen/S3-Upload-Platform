@@ -10,6 +10,7 @@ A password-protected, self-hosted dashboard to browse Hetzner Object Storage buc
 - 🚀 Upload large files using multipart uploads that stream straight from the browser to Hetzner S3
 - ☁️ Server only signs AWS S3 requests; object data never transits the server
 - 🐳 Deployable via Docker and Coolify with environment-based configuration
+- 🎧 Optional audio utilities for extracting MP3 tracks from videos and splitting audio into shareable clips
 
 ## Architecture overview
 
@@ -89,6 +90,8 @@ The script creates a temporary object using multipart uploads, reports progress,
    ```
 3. Visit `http://localhost:3000` and authenticate with username `admin` and your `ADMIN_PASSWORD` value.
 
+> ℹ️ Audio processing relies on FFmpeg/FFprobe. The project bundles static binaries via [`ffmpeg-static`](https://github.com/eugeneware/ffmpeg-static) and [`ffprobe-static`](https://github.com/joshwnj/ffprobe-static), but you can also install FFmpeg system-wide (the provided Dockerfile uses `apk add ffmpeg`).
+
 ## Docker usage
 
 Build and run the container locally:
@@ -103,6 +106,71 @@ docker run --rm -p 3000:3000 \
   -e S3_SECRET_ACCESS_KEY=... \
   -e ADMIN_PASSWORD=... \
   hetzner-s3-ui
+```
+
+The container installs FFmpeg so both audio endpoints work without additional configuration.
+
+Run tests (including the `/splitaudio` integration check) locally or in CI with:
+
+```bash
+npm test
+```
+
+## Audio processing API
+
+The server exposes two helper endpoints that repurpose FFmpeg to deliver ready-to-download audio assets:
+
+### `POST /api/getaudio`
+
+Downloads a remote video and extracts an MP3 track that remains publicly downloadable for 30 minutes. Provide the JSON body `{ "video_url": "https://example.com/video.mp4" }`. The response payload contains an `audio_url` pointing to the generated MP3 inside `public/generated-audio/`.
+
+### `POST /splitaudio`
+
+Splits an uploaded audio file into smaller segments, optionally returning a ZIP archive of the clips. Files are retained for 30 minutes before automatic cleanup so clients have time to download the generated content.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `audio` | file (required) | — | Audio file to split (`mp3`, `wav`, `m4a`, `flac`, `ogg`). Maximum 25&nbsp;MiB. |
+| `mode` | string | `silence` | `silence` detects quiet sections and splits around them, `fixed` produces fixed-size chunks. |
+| `min_silence_ms` | integer | `500` | Minimum silence duration (milliseconds) before a split is inserted. Only used in `silence` mode. |
+| `silence_thresh_db` | integer | `-40` | Volume threshold in decibels (dBFS) that counts as silence. Only used in `silence` mode. |
+| `chunk_duration_sec` | integer | `30` | Length of each segment in seconds when `mode=fixed`. |
+| `max_segments` | integer | — | Cap the number of produced clips. |
+| `output_format` | string | original format if supported, otherwise `wav` | Target format (`mp3` or `wav`). |
+| `sample_rate` | integer | source sample rate | Optional resampling (Hz). |
+| `channels` | integer | source channel count | Override channel count (1 = mono, 2 = stereo). |
+| `archive` | boolean | `false` | When `true`, returns a ZIP stream containing all generated segments. |
+
+JSON responses look like:
+
+```json
+{
+  "segments": [
+    {
+      "filename": "segment_001.mp3",
+      "url": "http://localhost:3000/generated-audio/segment_001.mp3",
+      "start_ms": 0,
+      "end_ms": 27890,
+      "duration_ms": 27890,
+      "size_bytes": 123456
+    }
+  ],
+  "count": 1,
+  "mode": "silence"
+}
+```
+
+Example request that streams a ZIP archive to disk:
+
+```bash
+curl -X POST http://localhost:3000/splitaudio \
+  -u admin:your-password \
+  -F "audio=@/path/input.mp3" \
+  -F "mode=silence" \
+  -F "min_silence_ms=500" \
+  -F "silence_thresh_db=-40" \
+  -F "archive=true" \
+  -o segments.zip
 ```
 
 ## Deploying with Coolify

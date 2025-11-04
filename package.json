@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "check:s3-multipart": "tsx scripts/check-s3-multipart.ts"
+    "check:s3-multipart": "tsx scripts/check-s3-multipart.ts",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20"
@@ -14,10 +15,13 @@
     "@aws-sdk/client-s3": "3.726.1",
     "@aws-sdk/lib-storage": "3.726.1",
     "@aws-sdk/s3-request-presigner": "3.726.1",
+    "archiver": "^6.0.2",
     "express": "^4.19.2",
     "express-basic-auth": "^1.2.1",
     "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0",
     "helmet": "^7.1.0",
+    "multer": "^2.0.0",
     "semver": "7.6.3"
   },
   "devDependencies": {
