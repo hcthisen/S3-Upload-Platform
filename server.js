@@ -202,6 +202,8 @@ if (invalidForcePathStyle) {
   });
 }
 
+const SIGNING_ESCAPE_PATH = usingHetznerEndpoint ? false : true;
+
 const closeLogStream = () => {
   if (logStream) {
     logStream.end();
@@ -249,7 +251,7 @@ const s3Client = new S3Client({
     secretAccessKey: S3_SECRET_ACCESS_KEY
   },
   forcePathStyle: FORCE_PATH_STYLE_RESOLVED,
-  signingEscapePath: true,
+  signingEscapePath: SIGNING_ESCAPE_PATH,
   requestChecksumCalculation: REQUEST_CHECKSUM_CALCULATION,
   responseChecksumValidation: RESPONSE_CHECKSUM_VALIDATION
 });
@@ -291,15 +293,62 @@ const extractFileName = ({ key, url }) => {
   }
 
   if (typeof url === 'string' && url.trim()) {
-    try {
-      const parsedUrl = new URL(url.trim());
+    const trimmedUrl = url.trim();
+    const attempted = new Set([trimmedUrl]);
+    const attemptCandidates = [trimmedUrl];
+
+    const addCandidate = (candidate) => {
+      if (typeof candidate !== 'string' || candidate.length === 0) {
+        return;
+      }
+      if (!attempted.has(candidate)) {
+        attempted.add(candidate);
+        attemptCandidates.push(candidate);
+      }
+    };
+
+    const schemePattern = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
+    const endpointForFallback = (() => {
+      if (!S3_ENDPOINT) {
+        return null;
+      }
+      try {
+        return new URL(S3_ENDPOINT);
+      } catch {
+        return null;
+      }
+    })();
+
+    if (!schemePattern.test(trimmedUrl)) {
+      if (trimmedUrl.startsWith('//')) {
+        addCandidate(`https:${trimmedUrl}`);
+      } else {
+        if (endpointForFallback) {
+          addCandidate(`${endpointForFallback.origin}${trimmedUrl.startsWith('/') ? trimmedUrl : `/${trimmedUrl}`}`);
+        }
+        addCandidate(`https://${trimmedUrl}`);
+      }
+    }
+
+    let parsedUrl = null;
+    for (const candidate of attemptCandidates) {
+      try {
+        parsedUrl = new URL(candidate);
+        break;
+      } catch {
+        continue;
+      }
+    }
+
+    if (parsedUrl) {
       sources.push(parsedUrl.pathname);
-    } catch (error) {
+    } else {
       logger.warn('Failed to parse upload URL while extracting file name', {
         url,
-        error: serializeError(error)
+        attempts: Array.from(attempted),
+        error: serializeError(new TypeError('Invalid URL'))
       });
-      sources.push(url.trim());
+      sources.push(trimmedUrl);
     }
   }
 
@@ -376,7 +425,8 @@ logger.info('Server configuration', {
   uploadMaxConcurrency: uploadConfig.maxConcurrency,
   requestChecksumCalculation: REQUEST_CHECKSUM_CALCULATION,
   responseChecksumValidation: RESPONSE_CHECKSUM_VALIDATION,
-  forcePathStyle: FORCE_PATH_STYLE_RESOLVED
+  forcePathStyle: FORCE_PATH_STYLE_RESOLVED,
+  signingEscapePath: SIGNING_ESCAPE_PATH
 });
 app.use(helmet({
   contentSecurityPolicy: false
