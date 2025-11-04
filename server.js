@@ -14,16 +14,13 @@ import {
   ListPartsCommand
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-
-const resolveBucket = () => {
-  const candidates = [
-    process.env.S3_BUCKET,
-    process.env.S3_BUCKET_NAME,
-    process.env.BUCKET,
-    process.env.BUCKET_NAME
-  ];
-  return candidates.find((value) => typeof value === 'string' && value.trim().length > 0) || '';
-};
+import {
+  resolveBucket,
+  resolveRequestChecksumCalculation,
+  resolveResponseChecksumValidation,
+  resolveForcePathStyle,
+  ensureHetznerCompatibleSdk
+} from './s3/utils.js';
 
 const requiredEnv = {
   S3_ENDPOINT: process.env.S3_ENDPOINT,
@@ -85,22 +82,6 @@ const parsePositiveInteger = (value, fallback) => {
 const MIN_PART_SIZE = 5 * 1024 * 1024;
 const DEFAULT_PART_SIZE = 8 * 1024 * 1024;
 const DEFAULT_CONCURRENCY = 4;
-const DEFAULT_REQUEST_CHECKSUM_CALCULATION = 'WHEN_REQUIRED';
-
-const resolveRequestChecksumCalculation = (value) => {
-  if (typeof value !== 'string') {
-    return { value: DEFAULT_REQUEST_CHECKSUM_CALCULATION, invalidValue: null };
-  }
-
-  const normalized = value.trim().toUpperCase();
-  const allowedValues = new Set(['WHEN_SUPPORTED', 'WHEN_REQUIRED']);
-  if (allowedValues.has(normalized)) {
-    return { value: normalized, invalidValue: null };
-  }
-
-  return { value: DEFAULT_REQUEST_CHECKSUM_CALCULATION, invalidValue: value };
-};
-
 const configuredPartSize = parsePositiveInteger(process.env.UPLOAD_PART_SIZE_BYTES, DEFAULT_PART_SIZE);
 const uploadConfig = {
   partSizeBytes: Math.max(configuredPartSize, MIN_PART_SIZE),
@@ -111,6 +92,11 @@ const {
   value: REQUEST_CHECKSUM_CALCULATION,
   invalidValue: invalidRequestChecksumCalculation
 } = resolveRequestChecksumCalculation(process.env.S3_REQUEST_CHECKSUM_CALCULATION);
+
+const {
+  value: RESPONSE_CHECKSUM_VALIDATION,
+  invalidValue: invalidResponseChecksumValidation
+} = resolveResponseChecksumValidation(process.env.S3_RESPONSE_CHECKSUM_VALIDATION);
 
 const serializeError = (error) => ({
   name: error?.name,
@@ -185,9 +171,34 @@ if (invalidRequestChecksumCalculation) {
   });
 }
 
+if (invalidResponseChecksumValidation) {
+  logger.warn('Invalid S3_RESPONSE_CHECKSUM_VALIDATION value provided, falling back to default', {
+    providedValue: invalidResponseChecksumValidation,
+    appliedValue: RESPONSE_CHECKSUM_VALIDATION
+  });
+}
+
 if (usedDefaultUploadWebhook) {
   logger.warn('UPLOAD_WEBHOOK_URL not configured, using default webhook URL', {
     webhookUrl: UPLOAD_WEBHOOK_URL
+  });
+}
+
+const {
+  version: s3SdkVersion,
+  endpointHost: s3EndpointHost,
+  isHetzner: usingHetznerEndpoint
+} = ensureHetznerCompatibleSdk({ endpoint: S3_ENDPOINT, logger });
+
+const {
+  value: FORCE_PATH_STYLE_RESOLVED,
+  invalidValue: invalidForcePathStyle
+} = resolveForcePathStyle(FORCE_PATH_STYLE);
+
+if (invalidForcePathStyle) {
+  logger.warn('Invalid FORCE_PATH_STYLE value provided, defaulting to virtual-hosted style addressing', {
+    providedValue: invalidForcePathStyle,
+    appliedValue: FORCE_PATH_STYLE_RESOLVED
   });
 }
 
@@ -227,6 +238,9 @@ const parseTrustProxy = (value) => {
   return value;
 };
 
+// Hetzner Object Storage rejects the SDK's newer data-integrity features, so the
+// runtime guard above enforces that we stay on a compatible @aws-sdk/client-s3
+// release until Hetzner updates their S3 implementation.
 const s3Client = new S3Client({
   region: S3_REGION,
   endpoint: S3_ENDPOINT,
@@ -234,10 +248,10 @@ const s3Client = new S3Client({
     accessKeyId: S3_ACCESS_KEY_ID,
     secretAccessKey: S3_SECRET_ACCESS_KEY
   },
-  forcePathStyle: FORCE_PATH_STYLE ? FORCE_PATH_STYLE.toLowerCase() === 'true' : true,
+  forcePathStyle: FORCE_PATH_STYLE_RESOLVED,
   signingEscapePath: true,
   requestChecksumCalculation: REQUEST_CHECKSUM_CALCULATION,
-  responseChecksumValidation: 'WHEN_REQUIRED'
+  responseChecksumValidation: RESPONSE_CHECKSUM_VALIDATION
 });
 
 const app = express();
@@ -352,12 +366,17 @@ app.set('trust proxy', trustProxySetting);
 
 logger.info('Server configuration', {
   s3Endpoint: S3_ENDPOINT,
+  s3EndpointHost: s3EndpointHost || null,
+  s3SdkVersion,
   s3Bucket: S3_BUCKET,
+  usingHetznerEndpoint,
   trustProxy: app.get('trust proxy'),
   logFile: LOG_FILE || null,
   uploadPartSizeBytes: uploadConfig.partSizeBytes,
   uploadMaxConcurrency: uploadConfig.maxConcurrency,
-  requestChecksumCalculation: REQUEST_CHECKSUM_CALCULATION
+  requestChecksumCalculation: REQUEST_CHECKSUM_CALCULATION,
+  responseChecksumValidation: RESPONSE_CHECKSUM_VALIDATION,
+  forcePathStyle: FORCE_PATH_STYLE_RESOLVED
 });
 app.use(helmet({
   contentSecurityPolicy: false
