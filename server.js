@@ -282,11 +282,11 @@ const AUDIO_PUBLIC_SUBDIR = 'generated-audio';
 const AUDIO_OUTPUT_DIR = path.resolve('public', AUDIO_PUBLIC_SUBDIR);
 const AUDIO_RETENTION_MS = 30 * 60 * 1000;
 const AUDIO_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
-const AUDIO_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const AUDIO_MIN_FRAGMENT_MS = 500;
 const DEFAULT_MIN_SILENCE_MS = 500;
 const DEFAULT_SILENCE_THRESHOLD_DB = -40;
-const DEFAULT_CHUNK_DURATION_SEC = 30;
+const DEFAULT_CHUNK_DURATION_MS = 1_200_000;
+const DEFAULT_CHUNK_OVERLAP_MS = 0;
 const ALLOWED_VIDEO_EXTENSIONS = new Set([
   '.3gp',
   '.avi',
@@ -337,7 +337,6 @@ const AUDIO_MIME_EXTENSION_MAP = new Map([
   ['audio/ogg', '.ogg'],
   ['audio/opus', '.ogg']
 ]);
-const ALLOWED_OUTPUT_FORMATS = new Set(['mp3', 'wav']);
 
 try {
   fs.mkdirSync(AUDIO_OUTPUT_DIR, { recursive: true });
@@ -426,9 +425,6 @@ const audioUpload = multer({
       cb(null, `audio-upload-${Date.now()}-${crypto.randomUUID()}${extension}`);
     }
   }),
-  limits: {
-    fileSize: AUDIO_MAX_UPLOAD_BYTES
-  },
   fileFilter: (req, file, cb) => {
     const extension = typeof file.originalname === 'string'
       ? path.extname(file.originalname).toLowerCase()
@@ -448,6 +444,11 @@ const audioUpload = multer({
 });
 
 const audioUploadMiddleware = (req, res, next) => {
+  if (!req.is('multipart/form-data')) {
+    next();
+    return;
+  }
+
   audioUpload.single('audio')(req, res, (error) => {
     if (!error) {
       next();
@@ -455,11 +456,6 @@ const audioUploadMiddleware = (req, res, next) => {
     }
 
     if (error instanceof multer.MulterError) {
-      if (error.code === 'LIMIT_FILE_SIZE') {
-        res.status(413).json({ error: 'Audio file exceeds the 25 MB limit' });
-        return;
-      }
-
       logger.warn('Multer reported an error while processing audio upload', {
         error: serializeError(error)
       });
@@ -477,6 +473,108 @@ const audioUploadMiddleware = (req, res, next) => {
     });
     res.status(400).json({ error: 'Failed to process uploaded audio' });
   });
+};
+
+const normalizeContentType = (value) => {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value.split(';')[0].trim().toLowerCase();
+};
+
+const createAudioSourceError = (statusCode, publicMessage, logMessage) => {
+  const error = new Error(logMessage || publicMessage);
+  error.statusCode = statusCode;
+  error.publicMessage = publicMessage;
+  return error;
+};
+
+const downloadAudioFromPublicUrl = async (audioUrlRaw) => {
+  if (typeof audioUrlRaw !== 'string' || audioUrlRaw.trim().length === 0) {
+    throw createAudioSourceError(400, 'audio_url is required');
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(audioUrlRaw.trim());
+  } catch (error) {
+    throw createAudioSourceError(400, 'audio_url must be a valid URL');
+  }
+
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+    throw createAudioSourceError(400, 'audio_url must use HTTP or HTTPS');
+  }
+
+  let response;
+  try {
+    response = await fetch(parsedUrl.toString());
+  } catch (error) {
+    throw createAudioSourceError(502, 'Unable to download audio from the provided URL', 'Failed to fetch remote audio');
+  }
+
+  if (!response.ok) {
+    const statusText = typeof response.statusText === 'string' ? response.statusText : '';
+    throw createAudioSourceError(
+      502,
+      'Unable to download audio from the provided URL',
+      `Unexpected status ${response.status}${statusText ? ` ${statusText}` : ''}`
+    );
+  }
+
+  if (!response.body) {
+    throw createAudioSourceError(
+      502,
+      'Invalid response when downloading audio',
+      'Response body missing while downloading audio'
+    );
+  }
+
+  const contentType = normalizeContentType(response.headers.get('content-type'));
+  const extensionFromPath = path.extname(parsedUrl.pathname).toLowerCase();
+  const extensionAllowed = ALLOWED_AUDIO_EXTENSIONS.has(extensionFromPath);
+  const contentTypeAllowed = ALLOWED_AUDIO_MIME_TYPES.has(contentType);
+
+  if (!extensionAllowed && !contentTypeAllowed) {
+    throw createAudioSourceError(415, 'Unsupported audio format at provided URL');
+  }
+
+  const resolvedExtension = extensionAllowed
+    ? extensionFromPath
+    : (AUDIO_MIME_EXTENSION_MAP.get(contentType) || '.tmp');
+  const tempFileName = `audio-remote-${Date.now()}-${crypto.randomUUID()}${resolvedExtension || '.tmp'}`;
+  const tempFilePath = path.join(tmpdir(), tempFileName);
+
+  try {
+    await streamPipeline(response.body, fs.createWriteStream(tempFilePath));
+  } catch (error) {
+    try {
+      await fs.promises.unlink(tempFilePath);
+    } catch (cleanupError) {
+      if (cleanupError?.code !== 'ENOENT') {
+        logger.warn('Failed to cleanup temporary remote audio file', {
+          file: tempFilePath,
+          error: serializeError(cleanupError)
+        });
+      }
+    }
+
+    throw createAudioSourceError(502, 'Failed to download audio from the provided URL', 'Streaming remote audio failed');
+  }
+
+  const originalName = (() => {
+    const candidate = path.basename(parsedUrl.pathname);
+    if (candidate && candidate !== '/' && candidate.trim().length > 0) {
+      return candidate;
+    }
+    return `remote-audio${resolvedExtension || ''}`;
+  })();
+
+  return {
+    path: tempFilePath,
+    originalname: originalName,
+    mimetype: contentType || 'application/octet-stream'
+  };
 };
 
 const safeUnlink = async (filePath) => {
@@ -900,19 +998,25 @@ const buildSegmentsFromSilence = (durationMs, silenceIntervals) => {
     .filter((segment) => segment.durationMs > 0);
 };
 
-const buildFixedSegments = (durationMs, chunkDurationSec) => {
-  const chunkDurationMs = Math.max(1, chunkDurationSec) * 1000;
+const buildFixedSegments = (durationMs, chunkDurationMs, overlapMs = 0) => {
+  const normalizedChunkDuration = Math.max(1, Math.floor(chunkDurationMs));
+  const normalizedOverlap = Math.max(0, Math.min(Math.floor(overlapMs), normalizedChunkDuration - 1));
   const segments = [];
   let cursor = 0;
 
   while (cursor < durationMs) {
-    const end = Math.min(cursor + chunkDurationMs, durationMs);
+    const end = Math.min(cursor + normalizedChunkDuration, durationMs);
     segments.push({
       startMs: cursor,
       endMs: end,
       durationMs: Math.max(0, Math.floor(end - cursor))
     });
-    cursor = end;
+    if (end >= durationMs) {
+      break;
+    }
+
+    const nextStart = end - normalizedOverlap;
+    cursor = Math.max(nextStart, cursor + 1);
   }
 
   return segments.filter((segment) => segment.durationMs > 0);
@@ -1025,29 +1129,76 @@ const parseBoolean = (value, fallback = false) => {
 };
 
 app.post('/splitaudio', audioUploadMiddleware, asyncHandler(async (req, res) => {
-  const uploadedFile = req.file;
+  const body = req.body || {};
+  const audioUrlRaw = typeof body.audio_url === 'string' ? body.audio_url.trim() : '';
 
-  if (!uploadedFile) {
-    return res.status(400).json({ error: 'audio field is required' });
+  let uploadedFile = req.file;
+
+  if (!uploadedFile && audioUrlRaw) {
+    try {
+      uploadedFile = await downloadAudioFromPublicUrl(audioUrlRaw);
+    } catch (error) {
+      const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 502;
+      const publicMessage = typeof error?.publicMessage === 'string'
+        ? error.publicMessage
+        : 'Failed to retrieve audio from the provided URL';
+
+      logger.warn('Failed to download remote audio for split request', {
+        audioUrl: audioUrlRaw || null,
+        statusCode,
+        error: serializeError(error)
+      });
+
+      return res.status(statusCode).json({ error: publicMessage });
+    }
   }
 
-  const body = req.body || {};
+  if (!uploadedFile) {
+    return res.status(400).json({ error: 'audio or audio_url is required' });
+  }
+
   const rawMode = typeof body.mode === 'string' ? body.mode.trim().toLowerCase() : '';
-  const mode = rawMode === 'fixed' ? 'fixed' : 'silence';
+  const mode = rawMode === 'silence' ? 'silence' : 'fixed';
   const minSilenceMs = parseInteger(body.min_silence_ms, DEFAULT_MIN_SILENCE_MS, { min: 1 });
   const silenceThresholdDb = parseInteger(body.silence_thresh_db, DEFAULT_SILENCE_THRESHOLD_DB, {});
-  const chunkDurationSec = parseInteger(body.chunk_duration_sec, DEFAULT_CHUNK_DURATION_SEC, { min: 1 });
+
+  const chunkDurationMs = (() => {
+    const providedMs = parseInteger(body.chunk_duration_ms, null, { min: 1 });
+    if (Number.isInteger(providedMs)) {
+      return providedMs;
+    }
+
+    const providedSec = parseInteger(body.chunk_duration_sec, null, { min: 1 });
+    if (Number.isInteger(providedSec)) {
+      return providedSec * 1000;
+    }
+
+    return DEFAULT_CHUNK_DURATION_MS;
+  })();
+
+  const overlapMs = (() => {
+    const providedMs = parseInteger(body.chunk_overlap_ms, null, { min: 0 });
+    if (Number.isInteger(providedMs)) {
+      return providedMs;
+    }
+
+    const providedSec = parseInteger(body.chunk_overlap_sec, null, { min: 0 });
+    if (Number.isInteger(providedSec)) {
+      return providedSec * 1000;
+    }
+
+    return DEFAULT_CHUNK_OVERLAP_MS;
+  })();
+
   const maxSegments = parseInteger(body.max_segments, null, { min: 1 });
   const sampleRate = parseInteger(body.sample_rate, null, { min: 1 });
   const channels = parseInteger(body.channels, null, { min: 1, max: 2 });
   const archiveRequested = parseBoolean(body.archive, false);
 
   const originalExt = path.extname(uploadedFile.originalname || '').toLowerCase().replace('.', '');
-  const requestedFormatRaw = typeof body.output_format === 'string' ? body.output_format.trim().toLowerCase() : '';
-  const requestedFormat = ALLOWED_OUTPUT_FORMATS.has(requestedFormatRaw) ? requestedFormatRaw : '';
-  const normalizedSourceFormat = ALLOWED_OUTPUT_FORMATS.has(originalExt) ? originalExt : null;
-  const targetFormat = requestedFormat || normalizedSourceFormat || 'wav';
-  const needsTranscode = Boolean(sampleRate) || Boolean(channels) || !normalizedSourceFormat || targetFormat !== normalizedSourceFormat;
+  const normalizedSourceFormat = originalExt === 'mp3' ? 'mp3' : null;
+  const targetFormat = 'mp3';
+  const needsTranscode = Boolean(sampleRate) || Boolean(channels) || normalizedSourceFormat !== targetFormat;
   const codec = needsTranscode ? targetFormat : 'copy';
 
   const createdFiles = [];
@@ -1071,7 +1222,7 @@ app.post('/splitaudio', audioUploadMiddleware, asyncHandler(async (req, res) => 
     let segments;
     try {
       if (mode === 'fixed') {
-        segments = buildFixedSegments(durationMs, chunkDurationSec);
+        segments = buildFixedSegments(durationMs, chunkDurationMs, overlapMs);
       } else {
         const silenceIntervals = await detectSilenceIntervals(uploadedFile.path, {
           minSilenceMs,

@@ -130,13 +130,14 @@ Splits an uploaded audio file into smaller segments, optionally returning a ZIP 
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `audio` | file (required) | — | Audio file to split (`mp3`, `wav`, `m4a`, `flac`, `ogg`). Maximum 25&nbsp;MiB. |
-| `mode` | string | `silence` | `silence` detects quiet sections and splits around them, `fixed` produces fixed-size chunks. |
+| `audio` | file (optional) | — | Multipart audio upload (`mp3`, `wav`, `m4a`, `flac`, `ogg`). Provide when not using `audio_url`. |
+| `audio_url` | string (optional) | — | HTTP(S) URL pointing to a publicly accessible audio file. The server downloads large sources directly. |
+| `mode` | string | `fixed` | `fixed` produces fixed-size clips, `silence` detects quiet sections and splits around them. |
 | `min_silence_ms` | integer | `500` | Minimum silence duration (milliseconds) before a split is inserted. Only used in `silence` mode. |
 | `silence_thresh_db` | integer | `-40` | Volume threshold in decibels (dBFS) that counts as silence. Only used in `silence` mode. |
-| `chunk_duration_sec` | integer | `30` | Length of each segment in seconds when `mode=fixed`. |
+| `chunk_duration_ms` | integer | `1200000` | Length of each segment in milliseconds when `mode=fixed` (20 minutes). Accepts `chunk_duration_sec` as an alias. |
+| `chunk_overlap_ms` | integer | `0` | Overlap between consecutive `fixed` segments in milliseconds. Accepts `chunk_overlap_sec` as an alias. |
 | `max_segments` | integer | — | Cap the number of produced clips. |
-| `output_format` | string | original format if supported, otherwise `wav` | Target format (`mp3` or `wav`). |
 | `sample_rate` | integer | source sample rate | Optional resampling (Hz). |
 | `channels` | integer | source channel count | Override channel count (1 = mono, 2 = stereo). |
 | `archive` | boolean | `false` | When `true`, returns a ZIP stream containing all generated segments. |
@@ -166,11 +167,24 @@ Example request that streams a ZIP archive to disk:
 curl -X POST http://localhost:3000/splitaudio \
   -u admin:your-password \
   -F "audio=@/path/input.mp3" \
-  -F "mode=silence" \
-  -F "min_silence_ms=500" \
-  -F "silence_thresh_db=-40" \
+  -F "mode=fixed" \
+  -F "chunk_duration_ms=600000" \
+  -F "chunk_overlap_ms=0" \
   -F "archive=true" \
   -o segments.zip
+```
+
+Example JSON request that downloads audio from a public URL before splitting:
+
+```bash
+curl -X POST http://localhost:3000/splitaudio \
+  -u admin:your-password \
+  -H "Content-Type: application/json" \
+  -d '{
+    "audio_url": "https://example.com/audio/master.mp3",
+    "mode": "fixed",
+    "chunk_duration_ms": 1200000
+  }'
 ```
 
 ## Deploying with Coolify
