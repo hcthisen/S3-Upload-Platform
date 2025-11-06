@@ -344,7 +344,7 @@
           <button class="primary" type="button" id="select-files-btn">Select files</button>
           <button type="button" id="cancel-upload-btn" disabled>Cancel upload</button>
         </div>
-        <input type="file" id="file-input" hidden />
+        <input type="file" id="file-input" hidden multiple />
         <p class="status" id="upload-status" hidden></p>
         <div class="progress" id="upload-progress" hidden>
           <div class="progress-bar" id="upload-progress-bar"></div>
@@ -797,6 +797,8 @@
       let activeUploadController = null;
       let activeUploadKey = null;
       let activeUploadId = null;
+      let uploadQueue = [];
+      let isProcessingQueue = false;
 
       function showUploadStatus(message) {
         if (uploadStatusEl) {
@@ -865,13 +867,9 @@
         }
       }
 
-      async function handleFileSelection(file) {
+      async function uploadFile(file, { index, total }) {
         if (!file) {
-          return;
-        }
-
-        if (activeUploadController) {
-          activeUploadController.abort();
+          return { status: 'skipped' };
         }
 
         const key = `${currentPrefix}${file.name}`;
@@ -880,16 +878,8 @@
         activeUploadKey = key;
         activeUploadId = null;
 
-        if (selectFilesBtn) {
-          selectFilesBtn.disabled = true;
-          selectFilesBtn.setAttribute('aria-disabled', 'true');
-        }
-        if (cancelUploadBtn) {
-          cancelUploadBtn.disabled = false;
-        }
-
         updateProgress(0);
-        showUploadStatus(`Preparing upload for ${file.name}…`);
+        showUploadStatus(`Preparing upload for ${file.name} (${index} of ${total})…`);
 
         try {
           const result = await multipartUpload(file, key, {
@@ -900,7 +890,7 @@
             onProgress: ({ bytesUploaded, bytesTotal }) => {
               const percent = bytesTotal === 0 ? 0 : Math.round((bytesUploaded / bytesTotal) * 100);
               updateProgress(percent);
-              showUploadStatus(`Uploading ${file.name} (${percent}%)`);
+              showUploadStatus(`Uploading ${file.name} (${index} of ${total}) — ${percent}%`);
             }
           });
 
@@ -908,29 +898,80 @@
           updateProgress(100);
           showUploadStatus(`Upload complete: ${location}`);
           showNotification('Video added to database');
-          if (cancelUploadBtn) {
-            cancelUploadBtn.disabled = true;
-          }
           await loadPrefix(currentPrefix);
+          return { status: 'success' };
         } catch (error) {
           if (error?.name === 'AbortError') {
             showUploadStatus('Upload cancelled');
-          } else {
-            console.error('Upload failed', error);
-            showUploadStatus(`Upload failed: ${error?.message || error}`);
-            if (activeUploadId && activeUploadKey) {
-              try {
-                await postJson('/api/abort-multipart', { key: activeUploadKey, uploadId: activeUploadId });
-              } catch (abortError) {
-                console.warn('Failed to clean up multipart upload', abortError);
-              }
+            return { status: 'aborted' };
+          }
+
+          console.error('Upload failed', error);
+          showUploadStatus(`Upload failed: ${error?.message || error}`);
+          if (activeUploadId && activeUploadKey) {
+            try {
+              await postJson('/api/abort-multipart', { key: activeUploadKey, uploadId: activeUploadId });
+            } catch (abortError) {
+              console.warn('Failed to clean up multipart upload', abortError);
             }
           }
+          return { status: 'failed' };
         } finally {
           activeUploadController = null;
           activeUploadKey = null;
           activeUploadId = null;
-          resetUploadState();
+        }
+      }
+
+      async function processUploadQueue() {
+        if (isProcessingQueue || uploadQueue.length === 0) {
+          return;
+        }
+
+        isProcessingQueue = true;
+        let processedCount = 0;
+
+        if (selectFilesBtn) {
+          selectFilesBtn.disabled = true;
+          selectFilesBtn.setAttribute('aria-disabled', 'true');
+        }
+        if (cancelUploadBtn) {
+          cancelUploadBtn.disabled = false;
+        }
+
+        while (uploadQueue.length > 0) {
+          const file = uploadQueue.shift();
+          processedCount += 1;
+          const total = processedCount + uploadQueue.length;
+          const result = await uploadFile(file, { index: processedCount, total });
+
+          if (result.status === 'success') {
+            continue;
+          }
+
+          if (result.status === 'aborted') {
+            uploadQueue.length = 0;
+          } else if (result.status === 'failed') {
+            uploadQueue.length = 0;
+          }
+          break;
+        }
+
+        isProcessingQueue = false;
+        uploadQueue.length = 0;
+        resetUploadState();
+      }
+
+      function enqueueFiles(files) {
+        const newFiles = Array.from(files || []).filter((file) => file instanceof File);
+        if (newFiles.length === 0) {
+          return;
+        }
+
+        uploadQueue.push(...newFiles);
+        if (!isProcessingQueue) {
+          showUploadStatus(`Queued ${uploadQueue.length} file(s) for upload…`);
+          processUploadQueue();
         }
       }
 
@@ -942,18 +983,22 @@
 
       if (fileInput) {
         fileInput.addEventListener('change', (event) => {
-          const file = event.target.files && event.target.files[0];
-          if (file) {
-            handleFileSelection(file);
+          const files = event.target.files ? Array.from(event.target.files) : [];
+          if (files.length > 0) {
+            enqueueFiles(files);
           }
+          event.target.value = '';
         });
       }
 
       if (cancelUploadBtn) {
         cancelUploadBtn.addEventListener('click', () => {
+          uploadQueue.length = 0;
           if (activeUploadController) {
             cancelUploadBtn.disabled = true;
             activeUploadController.abort();
+          } else {
+            resetUploadState();
           }
         });
       }
