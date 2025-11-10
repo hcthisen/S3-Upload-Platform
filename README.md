@@ -135,8 +135,8 @@ Splits an uploaded audio file into smaller segments, optionally returning a ZIP 
 | `mode` | string | `fixed` | `fixed` produces fixed-size clips, `silence` detects quiet sections and splits around them. |
 | `min_silence_ms` | integer | `500` | Minimum silence duration (milliseconds) before a split is inserted. Only used in `silence` mode. |
 | `silence_thresh_db` | integer | `-40` | Volume threshold in decibels (dBFS) that counts as silence. Only used in `silence` mode. |
-| `chunk_duration_ms` | integer | `1200000` | Length of each segment in milliseconds when `mode=fixed` (20 minutes). Accepts `chunk_duration_sec` as an alias. |
-| `chunk_overlap_ms` | integer | `0` | Overlap between consecutive `fixed` segments in milliseconds. Accepts `chunk_overlap_sec` as an alias. |
+| `chunk_duration_ms` | integer | `300000` | Length of each segment in milliseconds when `mode=fixed` (5 minutes). Accepts `chunk_duration_sec` as an alias. |
+| `chunk_overlap_ms` | integer | `2000` | Overlap between consecutive `fixed` segments in milliseconds. Accepts `chunk_overlap_sec` as an alias. |
 | `max_segments` | integer | — | Cap the number of produced clips. |
 | `sample_rate` | integer | source sample rate | Optional resampling (Hz). |
 | `channels` | integer | source channel count | Override channel count (1 = mono, 2 = stereo). |
@@ -183,7 +183,7 @@ curl -X POST http://localhost:3000/splitaudio \
   -d '{
     "audio_url": "https://example.com/audio/master.mp3",
     "mode": "fixed",
-    "chunk_duration_ms": 1200000
+    "chunk_duration_ms": 300000
   }'
 ```
 
