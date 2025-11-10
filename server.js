@@ -1072,6 +1072,13 @@ const transcodeSegment = async ({
   await runProcess(ffmpegPath, args);
 };
 
+const generateSegmentFilename = (index, extension) => {
+  const uniqueIdNumber = crypto.randomBytes(6).readUIntBE(0, 6);
+  const uniqueSuffix = uniqueIdNumber.toString().padStart(15, '0');
+  const paddedIndex = String(index + 1).padStart(3, '0');
+  return `segment_${paddedIndex}_${uniqueSuffix}.${extension}`;
+};
+
 const buildAudioUrl = (req, fileName) => {
   const host = req.get('host');
   if (!host) {
@@ -1258,7 +1265,7 @@ app.post('/splitaudio', audioUploadMiddleware, asyncHandler(async (req, res) => 
     try {
       for (let index = 0; index < segments.length; index += 1) {
         const segment = segments[index];
-        const filename = `segment_${String(index + 1).padStart(3, '0')}.${targetFormat}`;
+        const filename = generateSegmentFilename(index, targetFormat);
         const outputPath = path.join(AUDIO_OUTPUT_DIR, filename);
 
         await transcodeSegment({
