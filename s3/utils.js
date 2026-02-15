@@ -1,5 +1,5 @@
 import semver from 'semver';
-import s3PackageJson from '@aws-sdk/client-s3/package.json' assert { type: 'json' };
+import s3PackageJson from '@aws-sdk/client-s3/package.json' with { type: 'json' };
 
 export const HETZNER_ENDPOINT_SUFFIX = '.your-objectstorage.com';
 export const HETZNER_MIN_INCOMPATIBLE_VERSION = '3.729.0';
