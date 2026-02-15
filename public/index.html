@@ -638,11 +638,19 @@
         let cumulative = '';
         parts.forEach((part, index) => {
           cumulative += `${part}/`;
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.textContent = part;
-          btn.addEventListener('click', () => navigate(cumulative));
-          breadcrumb.appendChild(btn);
+          const isLast = index === parts.length - 1;
+          if (isLast) {
+            const span = document.createElement('span');
+            span.textContent = part;
+            breadcrumb.appendChild(span);
+          } else {
+            const target = cumulative;
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.textContent = part;
+            btn.addEventListener('click', () => navigate(target));
+            breadcrumb.appendChild(btn);
+          }
         });
       }
 

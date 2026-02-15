@@ -19,7 +19,8 @@ import {
   CompleteMultipartUploadCommand,
   AbortMultipartUploadCommand,
   UploadPartCommand,
-  ListPartsCommand
+  ListPartsCommand,
+  PutBucketCorsCommand
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
@@ -263,6 +264,22 @@ const s3Client = new S3Client({
   requestChecksumCalculation: REQUEST_CHECKSUM_CALCULATION,
   responseChecksumValidation: RESPONSE_CHECKSUM_VALIDATION
 });
+
+async function ensureBucketCors() {
+  const command = new PutBucketCorsCommand({
+    Bucket: S3_BUCKET,
+    CORSConfiguration: {
+      CORSRules: [{
+        AllowedOrigins: ['*'],
+        AllowedMethods: ['GET', 'PUT', 'POST', 'HEAD'],
+        AllowedHeaders: ['*'],
+        ExposeHeaders: ['ETag'],
+        MaxAgeSeconds: 3600
+      }]
+    }
+  });
+  await sendS3Command(command, { bucket: S3_BUCKET });
+}
 
 export const app = express();
 
@@ -1902,6 +1919,12 @@ app.use((err, req, res, next) => {
 if (process.env.NODE_ENV !== 'test') {
   app.listen(Number(PORT), () => {
     logger.info('Server running', { port: Number(PORT) });
+    ensureBucketCors()
+      .then(() => logger.info('S3 bucket CORS configuration applied', { bucket: S3_BUCKET }))
+      .catch((err) => logger.warn('Failed to apply S3 bucket CORS configuration', {
+        bucket: S3_BUCKET,
+        error: serializeError(err)
+      }));
   });
 }
 
